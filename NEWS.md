@@ -1,3 +1,10 @@
+# TempleCBE 0.11.0
+
+Minor release on top of 0.10.0 (which was not tagged). No function, argument or behaviour changes; 0.10.0's entries below are all part of this release.
+
+* **pkgdown:** `cgd_recurrent_data()` is listed in the reference index.
+* **Tests:** `imputation_sensitivity()` and its row-alignment helpers are now fully covered (argument checks, strategy errors, the `"missforest"` / `"missranger"` built-ins, the `coef()`/`vcov()` fallback, the unpooled-terms note and `print()`), as are the top-level `.pred_cif` / `.pred_survival` paths of `extract_horizon_risk()` and the unscorable `cox_time_varying()` case of `predict_event_risk()`.
+
 # TempleCBE 0.10.0
 
 Draft fixes and features from the fresh review of 2026-11-11 (Part 1: 141 new findings; Part 2: feature gaps A1–A8 and B1–B7), on top of 0.8.2. No export is removed.
