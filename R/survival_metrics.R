@@ -1315,16 +1315,37 @@ object_required_pkgs <- function(x, depth = 0L) {
     wfs <- tryCatch(lapply(x$info, function(inf) inf$workflow[[1]]), error = function(e) list())
     return(unique(unlist(lapply(wfs, object_required_pkgs, depth = depth + 1L), use.names = FALSE)))
   }
-  if (inherits(x, c("workflow", "model_spec", "model_fit", "recipe", "step"))) {
-    pk <- tryCatch(generics::required_pkgs(x, infra = TRUE), error = function(e) {
-      tryCatch(generics::required_pkgs(x), error = function(e) character())
-    })
-    return(unique(as.character(pk)))
+  if (inherits(x, "workflow")) {
+    # The workflow's own method, plus its model spec and recipe asked
+    # directly: an untrained workflow's method does not report the engine
+    # package in every workflows version.
+    parts <- list(
+      x,
+      tryCatch(workflows::extract_spec_parsnip(x), error = function(e) NULL),
+      tryCatch(workflows::extract_preprocessor(x), error = function(e) NULL)
+    )
+    return(unique(unlist(lapply(parts, safe_required_pkgs), use.names = FALSE)))
+  }
+  if (inherits(x, c("model_spec", "model_fit", "recipe", "step"))) {
+    return(safe_required_pkgs(x))
   }
   if (is.list(x) && !is.object(x) && depth < 2L) {
     return(unique(unlist(lapply(x, object_required_pkgs, depth = depth + 1L), use.names = FALSE)))
   }
   character()
+}
+
+# generics::required_pkgs() of a tidymodels object, or nothing when there is
+# no method or it fails.
+#' @noRd
+safe_required_pkgs <- function(x) {
+  if (is.null(x) || !inherits(x, c("workflow", "model_spec", "model_fit", "recipe", "step"))) {
+    return(character())
+  }
+  pk <- tryCatch(generics::required_pkgs(x, infra = TRUE), error = function(e) {
+    tryCatch(generics::required_pkgs(x), error = function(e) character())
+  })
+  unique(as.character(pk))
 }
 
 #' Did a Fold, Fit or Task Fail?

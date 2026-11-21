@@ -46,8 +46,19 @@ test_that("furrr_worker_packages() adds tidymodels, required_pkgs() and extra pa
 
   pk <- furrr_worker_packages(objects = list(wf), extra = "stats", session = FALSE)
   expect_true(all(c("recipes", "parsnip", "workflows", "survival") %in% pk))
-  # the engine package comes from generics::required_pkgs()
-  expect_true("rpart" %in% pk)
+  # the engine package comes from generics::required_pkgs() of the model spec
+  spec_pkgs <- generics::required_pkgs(workflows::extract_spec_parsnip(wf))
+  expect_true(
+    "rpart" %in% pk,
+    info = paste0(
+      "pk: ", paste(pk, collapse = ", "),
+      " | required_pkgs(spec): ", paste(spec_pkgs, collapse = ", "),
+      " | required_pkgs(wf): ", tryCatch(paste(generics::required_pkgs(wf), collapse = ", "),
+                                         error = function(e) conditionMessage(e)),
+      " | installed: ", worker_package_installed("rpart")
+    )
+  )
+  expect_true(all(spec_pkgs %in% pk))
   expect_true("stats" %in% pk)
   # a package that is not installed is dropped
   expect_false("notARealPackage123" %in% furrr_worker_packages(extra = "notARealPackage123", session = FALSE))
