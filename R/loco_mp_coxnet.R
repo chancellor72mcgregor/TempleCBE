@@ -245,7 +245,7 @@ loco_mp_coxnet <- function(formula = NULL,
   }
 
   patches <- if (isTRUE(parallel) && requireNamespace("furrr", quietly = TRUE)) {
-    furrr::future_map(seq_len(B), fit_one_patch, .options = furrr::furrr_options(seed = TRUE))
+    furrr::future_map(seq_len(B), fit_one_patch, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
   } else {
     lapply(seq_len(B), fit_one_patch)
   }

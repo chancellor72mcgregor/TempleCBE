@@ -140,16 +140,20 @@ checkpoint_map <- function(.x,
     }
   }
 
-  # Worker task function
+  # Worker task function. It is given an environment holding only what it
+  # uses: `future` serializes a closure's whole enclosing environment, so a
+  # closure over this frame would ship everything in it (and any unforced
+  # promise's environment) to every worker.
   evaluate_one <- function(i) {
     cf <- ckpt_files[[i]]
     expected_fp <- fps[i]
     is_active <- active_mask[i]
 
-    # Check cached
+    # Check cached; a cached failure (from before failures stopped being
+    # cached) is recomputed rather than replayed.
     if (!is.null(cf) && file.exists(cf)) {
       chk <- read_verified_checkpoint(cf, expected_fp, checkpoint_mismatch = "recompute")
-      if (identical(chk$status, "hit")) {
+      if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
         return(strip_checkpoint_attrs(chk$value))
       }
     }
@@ -160,7 +164,7 @@ checkpoint_map <- function(.x,
 
     val <- do.call(.f, c(list(.x[[i]]), dots))
 
-    if (!is.null(cf)) {
+    if (!is.null(cf) && !is_failed_result(val)) {
       write_verified_checkpoint(
         val, cf, fingerprint = expected_fp, run_fingerprint = run_fp,
         meta = list(fn = "checkpoint_map", key = keys[i], index = i, n_items = n)
@@ -168,6 +172,11 @@ checkpoint_map <- function(.x,
     }
     strip_checkpoint_attrs(val)
   }
+  evaluate_one <- with_worker_env(
+    evaluate_one,
+    ckpt_files = ckpt_files, fps = fps, active_mask = active_mask, .f = .f, .x = .x,
+    dots = dots, run_fp = run_fp, keys = keys, n = n
+  )
 
   is_parallel <- requireNamespace("future", quietly = TRUE) &&
     !inherits(future::plan(), "sequential") &&
@@ -175,7 +184,7 @@ checkpoint_map <- function(.x,
 
   indices <- seq_len(n)
   results <- if (is_parallel) {
-    furrr_pkgs <- furrr_worker_packages()
+    furrr_pkgs <- furrr_worker_packages(objects = c(list(.x), dots))
     f_opts <- furrr::furrr_options(seed = TRUE, packages = furrr_pkgs)
     furrr::future_map(indices, evaluate_one, .options = f_opts, .progress = progress)
   } else {
@@ -183,9 +192,71 @@ checkpoint_map <- function(.x,
   }
 
   names(results) <- if (!is.null(item_names)) item_names else keys
+  if (!is.null(checkpoint_dir)) {
+    warn_failed_not_checkpointed(results, keys, "checkpoint_map")
+  }
   attr(results, "checkpoint_run_fingerprint") <- run_fp
   attr(results, "seed_scheme") <- current_seed_scheme()
   results
+}
+
+#' Give a Worker Closure a Minimal Environment
+#'
+#' Returns `fun` with its enclosing environment replaced by a new one holding
+#' only the named values in `...`, whose parent is the package namespace.
+#' `future` serializes a closure together with its whole enclosing
+#' environment; a worker function defined inside a large frame (or a frame
+#' reachable through an unforced `...` promise) would otherwise ship that
+#' frame to every worker and can exceed `future.globals.maxSize`.
+#'
+#' @param fun A function.
+#' @param ... Named values the function uses.
+#' @return `fun` with a new environment.
+#' @keywords internal
+#' @noRd
+with_worker_env <- function(fun, ...) {
+  vals <- list(...)
+  env <- new.env(parent = topenv(environment(fun)))
+  for (nm in names(vals)) {
+    assign(nm, vals[[nm]], envir = env)
+  }
+  environment(fun) <- env
+  fun
+}
+
+# `x` without its elements named `drop`; unnamed elements are kept.
+#' @noRd
+drop_named <- function(x, drop) {
+  nms <- names(x)
+  if (is.null(nms)) {
+    return(x)
+  }
+  x[!(nms %in% drop)]
+}
+
+#' Warn About Results That Failed and Were Not Checkpointed
+#' @noRd
+warn_failed_not_checkpointed <- function(results, ids, fn) {
+  failed <- which(vapply(results, is_failed_result, logical(1)))
+  if (length(failed) == 0L) {
+    return(invisible(integer()))
+  }
+  msg <- NA_character_
+  for (k in failed) {
+    msg <- failed_result_message(results[[k]])
+    if (!is.na(msg)) break
+  }
+  warning(sprintf(
+    "%s(): %d of %d task(s) failed (%s)%s%s",
+    fn, length(failed), length(results),
+    paste(utils::head(ids[failed], 5L), collapse = ", "),
+    if (length(failed) > 5L) ", ..." else "",
+    paste0(
+      if (!is.na(msg)) paste0("; first error: ", msg) else "",
+      "; failed tasks are not checkpointed and are recomputed on the next run."
+    )
+  ), call. = FALSE)
+  invisible(failed)
 }
 
 # ==============================================================================
@@ -201,7 +272,8 @@ compute_tidymodels_split_fingerprint <- function(object,
                                                  grid = NULL,
                                                  metrics = NULL,
                                                  eval_time = NULL,
-                                                 control = NULL) {
+                                                 control = NULL,
+                                                 extra = NULL) {
   ckpt_schema <- checkpoint_schema_version()
   in_id <- if (inherits(split, "rsplit")) split$in_id else NULL
   out_id <- if (inherits(split, "rsplit")) {
@@ -255,6 +327,12 @@ compute_tidymodels_split_fingerprint <- function(object,
     eval_time = eval_time,
     control = control_repr
   )
+  # Further `...` arguments (param_info, a censoring model, ...) change the
+  # result too. Added only when there are any, so the fingerprints of runs
+  # without them are unchanged.
+  if (length(extra) > 0L) {
+    payload$extra <- paste0(as.character(openssl::sha256(serialize(extra, NULL))), collapse = "")
+  }
   paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
 }
 
@@ -297,17 +375,24 @@ tune_grid_checkpointed <- function(object,
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
   shard <- validate_shard_spec(shard)
   object <- apply_workflow_cox_ties(object)
+  dots <- list(...)
 
-  fit_split <- function(resamples) {
-    with_quiet_cox_ties(tune::tune_grid(
-      object = object,
-      resamples = resamples,
-      grid = grid,
-      metrics = metrics,
-      control = control,
-      ...
-    ))
-  }
+  # Built in an environment holding only its inputs (not this frame): an
+  # unforced `...` promise would otherwise carry the caller's frame, such as
+  # every earlier result of a workflow_map_checkpointed() loop, into the
+  # globals `future` ships to each worker.
+  fit_split <- with_worker_env(function(resamples) {
+    with_quiet_cox_ties(do.call(tune::tune_grid, c(
+      list(
+        object = object,
+        resamples = resamples,
+        grid = grid,
+        metrics = metrics,
+        control = control
+      ),
+      dots
+    )))
+  }, object = object, grid = grid, metrics = metrics, control = control, dots = dots)
   if (is.null(checkpoint_dir)) {
     return(fit_split(resamples))
   }
@@ -317,11 +402,13 @@ tune_grid_checkpointed <- function(object,
     fit_split = fit_split,
     split_fingerprint = function(split) {
       compute_tidymodels_split_fingerprint(
-        object = object, split = split, grid = grid, metrics = metrics, control = control
+        object = object, split = split, grid = grid, metrics = metrics, control = control,
+        eval_time = dots[["eval_time"]], extra = drop_named(dots, "eval_time")
       )
     },
     fn = "tune_grid_checkpointed",
     file_prefix = "tune_grid",
+    worker_objects = list(object, dots),
     verb = "tuned",
     fingerprint_inputs = "workflow spec, data, resamples, grid, metrics, control, or seed scheme",
     checkpoint_dir = checkpoint_dir,
@@ -364,15 +451,20 @@ fit_resamples_checkpointed <- function(object,
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
   shard <- validate_shard_spec(shard)
 
-  fit_split <- function(resamples) {
-    tune::fit_resamples(
-      object = object,
-      resamples = resamples,
-      metrics = metrics,
-      control = control,
-      ...
-    )
-  }
+  dots <- list(...)
+
+  # See tune_grid_checkpointed(): only the inputs, not this frame.
+  fit_split <- with_worker_env(function(resamples) {
+    do.call(tune::fit_resamples, c(
+      list(
+        object = object,
+        resamples = resamples,
+        metrics = metrics,
+        control = control
+      ),
+      dots
+    ))
+  }, object = object, metrics = metrics, control = control, dots = dots)
   if (is.null(checkpoint_dir)) {
     return(fit_split(resamples))
   }
@@ -382,11 +474,13 @@ fit_resamples_checkpointed <- function(object,
     fit_split = fit_split,
     split_fingerprint = function(split) {
       compute_tidymodels_split_fingerprint(
-        object = object, split = split, metrics = metrics, control = control
+        object = object, split = split, metrics = metrics, control = control,
+        eval_time = dots[["eval_time"]], extra = drop_named(dots, "eval_time")
       )
     },
     fn = "fit_resamples_checkpointed",
     file_prefix = "fit_resample",
+    worker_objects = list(object, dots),
     verb = "fit",
     fingerprint_inputs = "workflow spec, data, resamples, metrics, control, or seed scheme",
     checkpoint_dir = checkpoint_dir,
@@ -413,6 +507,8 @@ fit_resamples_checkpointed <- function(object,
 #' @param fingerprint_inputs What the fingerprint covers, for the message.
 #' @param checkpoint_dir,checkpoint_mismatch,progress As in the wrappers.
 #' @param shard A validated shard (see `validate_shard_spec()`) or `NULL`.
+#' @param worker_objects Objects (the workflow, the `...` arguments) whose
+#'   `generics::required_pkgs()` are attached on parallel workers.
 #' @keywords internal
 #' @noRd
 checkpointed_resamples <- function(resamples,
@@ -425,7 +521,8 @@ checkpointed_resamples <- function(resamples,
                                    checkpoint_dir,
                                    shard,
                                    checkpoint_mismatch,
-                                   progress) {
+                                   progress,
+                                   worker_objects = list()) {
   if (!inherits(resamples, "rset")) {
     stop("`resamples` must be an rsample rset object.", call. = FALSE)
   }
@@ -470,7 +567,8 @@ checkpointed_resamples <- function(resamples,
     cf <- ckpt_files[i]
     if (file.exists(cf)) {
       chk <- read_verified_checkpoint(cf, split_fps[i], checkpoint_mismatch = "recompute")
-      if (identical(chk$status, "hit")) {
+      # A failed fold cached by an earlier version is recomputed, not reused.
+      if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
         return(chk$value)
       }
     }
@@ -489,12 +587,22 @@ checkpointed_resamples <- function(resamples,
 
     res_single <- fit_split(single_rset)
 
-    write_verified_checkpoint(
-      res_single, cf, fingerprint = split_fps[i], run_fingerprint = run_fp,
-      meta = list(fn = fn, fold_id = fold_ids[i], index = i)
-    )
+    # A fold in which every model failed is returned (so the caller sees
+    # tune's notes) but not checkpointed, so a rerun tries it again.
+    if (!is_failed_result(res_single)) {
+      write_verified_checkpoint(
+        res_single, cf, fingerprint = split_fps[i], run_fingerprint = run_fp,
+        meta = list(fn = fn, fold_id = fold_ids[i], index = i)
+      )
+    }
     res_single
   }
+  # Only what the worker needs travels with it (see checkpoint_map()).
+  eval_split <- with_worker_env(
+    eval_split,
+    ckpt_files = ckpt_files, split_fps = split_fps, active_mask = active_mask,
+    resamples = resamples, fit_split = fit_split, run_fp = run_fp, fn = fn, fold_ids = fold_ids
+  )
 
   is_parallel <- requireNamespace("future", quietly = TRUE) &&
     !inherits(future::plan(), "sequential") &&
@@ -502,12 +610,14 @@ checkpointed_resamples <- function(resamples,
 
   indices <- seq_len(n_splits)
   rows <- if (is_parallel) {
-    furrr_pkgs <- furrr_worker_packages()
+    furrr_pkgs <- furrr_worker_packages(objects = worker_objects)
     f_opts <- furrr::furrr_options(seed = TRUE, packages = furrr_pkgs)
     furrr::future_map(indices, eval_split, .options = f_opts, .progress = progress)
   } else {
     purrr::map(indices, eval_split)
   }
+
+  warn_failed_not_checkpointed(rows, fold_ids, fn)
 
   good_rows <- Filter(Negate(is.null), rows)
   if (length(good_rows) == 0L) {
@@ -635,7 +745,7 @@ workflow_map_checkpointed <- function(object,
       ckpt_file <- file.path(w_dir, "workflow_result.rds")
       if (file.exists(ckpt_file)) {
         chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = "recompute")
-        if (identical(chk$status, "hit")) {
+        if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
           results_list[[i]] <- chk$value
         } else if (identical(chk$status, "mismatch")) {
           warning(
@@ -663,22 +773,17 @@ workflow_map_checkpointed <- function(object,
         ckpt_file <- file.path(w_dir, "workflow_result.rds")
         if (file.exists(ckpt_file)) {
           chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = checkpoint_mismatch)
-          if (identical(chk$status, "hit")) chk$value else {
-            if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
-            out_w <- workflowsets::workflow_map(object[i, , drop = FALSE], fn = fn, seed = seed, verbose = verbose, ...)
-            res_w <- out_w$result[[1]]
-            write_verified_checkpoint(res_w, ckpt_file, fingerprint = wflow_fps[i], run_fingerprint = run_fp,
-                                      meta = list(fn = "workflow_map_checkpointed", wflow_id = w_id))
-            res_w
+          if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
+            return(chk$value)
           }
-        } else {
-          if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
-          out_w <- workflowsets::workflow_map(object[i, , drop = FALSE], fn = fn, seed = seed, verbose = verbose, ...)
-          res_w <- out_w$result[[1]]
-          write_verified_checkpoint(res_w, ckpt_file, fingerprint = wflow_fps[i], run_fingerprint = run_fp,
-                                    meta = list(fn = "workflow_map_checkpointed", wflow_id = w_id))
-          res_w
         }
+        # Written once, below, and only when it did not fail.
+        if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
+        out_w <- do.call(workflowsets::workflow_map, c(
+          list(object = object[i, , drop = FALSE], fn = fn, seed = seed, verbose = verbose),
+          dots
+        ))
+        out_w$result[[1]]
       }
     }
 
@@ -690,8 +795,24 @@ workflow_map_checkpointed <- function(object,
 
     results_list[[i]] <- res_i
     ckpt_file <- file.path(w_dir, "workflow_result.rds")
-    write_verified_checkpoint(res_i, ckpt_file, fingerprint = wflow_fps[i], run_fingerprint = run_fp,
-                              meta = list(fn = "workflow_map_checkpointed", wflow_id = w_id))
+    if (is_failed_result(res_i)) {
+      # A workflow in which every model failed is not cached: a rerun (or a
+      # shard collecting it) would otherwise reuse the failure.
+      msg <- failed_result_message(res_i)
+      warning(
+        "workflow_map_checkpointed(): every model of workflow '", w_id, "' failed",
+        if (!is.na(msg)) paste0(" (first error: ", msg, ")") else "",
+        "; its result is not checkpointed and is recomputed on the next run.",
+        call. = FALSE
+      )
+      if (file.exists(ckpt_file)) unlink(ckpt_file)
+    } else {
+      write_verified_checkpoint(res_i, ckpt_file, fingerprint = wflow_fps[i], run_fingerprint = run_fp,
+                                meta = list(fn = "workflow_map_checkpointed", wflow_id = w_id))
+    }
+    # Drop this iteration's references before the next workflow, so nothing
+    # from it can be reached from the next workflow's worker closures.
+    rm(res_i, eval_expr, w_spec)
   }
 
   res_set <- object
