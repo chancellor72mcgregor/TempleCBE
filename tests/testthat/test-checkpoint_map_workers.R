@@ -172,7 +172,7 @@ test_that("with_worker_env() keeps only the named values", {
   fn <- make()
   expect_identical(sort(ls(environment(fn), all.names = TRUE)), "small")
   expect_equal(fn(1), 2)
-  expect_lt(length(serialize(fn, NULL)), 1e6)
+  expect_lt(length(serialize(utils::removeSource(fn), NULL)), 1e6)
 })
 
 test_that("the tune_grid_checkpointed() worker closure does not capture the caller's frame", {
@@ -199,7 +199,10 @@ test_that("the tune_grid_checkpointed() worker closure does not capture the call
   }
   caller()
   expect_true(is.function(captured))
-  expect_lt(length(serialize(captured, NULL)), 2e6)
+  # only its own inputs, not the caller's frame
+  expect_setequal(ls(environment(captured), all.names = TRUE), c("object", "grid", "metrics", "control", "dots"))
+  # srcrefs (and covr's instrumentation) add a few MB; the captured frame would add 16 MB
+  expect_lt(length(serialize(utils::removeSource(captured), NULL)), 8e6)
 })
 
 # ------------------------------------------------------------------------------
