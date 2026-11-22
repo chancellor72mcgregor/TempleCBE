@@ -190,3 +190,62 @@ test_that("tune_grid_start_stop() fits glmnet with pinned ties and a survival en
   expect_s3_class(res, "tune_results")
   expect_false(anyNA(tune::collect_metrics(res)$mean))
 })
+
+test_that("the 0.13.0 helpers validate their inputs", {
+  long <- data.frame(id = c(1, 1, NA), status = c(0, 1, 0))
+  expect_error(add_subject_status("x", "id", "status"), "data frame")
+  expect_error(add_subject_status(long, "id", "status"), "missing values")
+  expect_error(add_subject_status(long[1:2, ], "id", "status", event = NA), "event")
+  expect_error(add_subject_status(long[1:2, ], "id", "status", name = ""), "name")
+
+  expect_error(tidy_nested_cv_coxnet(data.frame(a = 1)), "nested_cv_coxnet")
+  empty <- tibble::tibble(id = "Fold1", mixture = 1, penalty = 0.1, .coefs = list(NULL), .importance = list(NULL))
+  expect_equal(nrow(tidy_nested_cv_coxnet(empty)), 0)
+  expect_named(tidy_nested_cv_coxnet(empty, "importance"),
+               c("id", "mixture", "penalty", "term", "importance", "std_error", "statistic",
+                 "p_value", "p_adjusted", "conf_low", "conf_high"))
+  expect_error(summarize_loco_mp(empty, alpha = 2), "alpha")
+  fit <- structure(
+    list(results = tibble::tibble(term = "x1", importance = 0.1, std_error = 0.02, p_adjusted = 0.01)),
+    class = "loco_mp_coxnet"
+  )
+  s <- summarize_loco_mp(fit)
+  expect_equal(s$n_folds, 1L)
+  expect_true(is.na(s$sd_importance))
+  expect_equal(s$n_significant, 1L)
+})
+
+test_that("subject_vfold_cv() and subject_nested_cv() check subject_id and keep the column on request", {
+  skip_if_no_v0130_deps()
+  d <- sim_counting(n = 40, seed = 6)
+  expect_error(subject_vfold_cv(d, "nope", v = 3), "nope")
+  expect_error(subject_nested_cv(d, "nope"), "subject_id")
+  n0 <- withr::with_seed(1, subject_nested_cv(d, "subject_id", outer_v = 2, inner_v = 2))
+  expect_equal(nrow(n0$inner_resamples[[1]]), 2)
+  kept <- withr::with_seed(1, subject_nested_cv(d, "subject_id", status = "status",
+                                                 outer_v = 2, inner_v = 2, keep_status = TRUE))
+  expect_true("subject_status" %in% names(kept$inner_resamples[[1]]$splits[[1]]$data))
+  # an existing `subject_status` column is left alone
+  d$subject_status <- "mine"
+  f <- withr::with_seed(1, subject_vfold_cv(d, "subject_id", status = "status", v = 2))
+  expect_identical(unique(f$splits[[1]]$data$subject_status), "mine")
+})
+
+test_that("workflow_map_checkpointed() pins cox.ties on the workflow set it maps", {
+  for (pkg in c("workflowsets", "parsnip", "censored", "workflows")) skip_if_not_installed(pkg)
+  suppressPackageStartupMessages(requireNamespace("censored"))
+  spec <- parsnip::set_engine(parsnip::proportional_hazards(penalty = 0.1), "glmnet")
+  wset <- workflowsets::workflow_set(list(f = survival::Surv(time, status) ~ x), list(cox = spec))
+  seen <- NULL
+  local_mocked_bindings(
+    workflow_map = function(object, fn = "tune_grid", verbose = FALSE, seed = 1, ...) {
+      seen <<- object
+      object
+    },
+    .package = "workflowsets"
+  )
+  workflow_map_checkpointed(wset, fn = "tune_grid", resamples = "r")
+  pinned <- workflows::extract_spec_parsnip(seen$info[[1]]$workflow[[1]])
+  expect_equal(rlang::eval_tidy(pinned$eng_args$cox.ties), "breslow")
+  expect_identical(apply_set_cox_ties("not a set"), "not a set")
+})
