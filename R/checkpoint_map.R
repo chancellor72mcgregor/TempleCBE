@@ -154,7 +154,7 @@ checkpoint_map <- function(.x,
     if (!is.null(cf) && file.exists(cf)) {
       chk <- read_verified_checkpoint(cf, expected_fp, checkpoint_mismatch = "recompute")
       if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
-        return(strip_checkpoint_attrs(chk$value))
+        return(strip_checkpoint_attrs(drop_note_traces(chk$value)))
       }
     }
 
@@ -165,6 +165,8 @@ checkpoint_map <- function(.x,
     val <- do.call(.f, c(list(.x[[i]]), dots))
 
     if (!is.null(cf) && !is_failed_result(val)) {
+      # Kept in memory as it is saved (see drop_note_traces()).
+      val <- drop_note_traces(val)
       write_verified_checkpoint(
         val, cf, fingerprint = expected_fp, run_fingerprint = run_fp,
         meta = list(fn = "checkpoint_map", key = keys[i], index = i, n_items = n)
@@ -563,20 +565,11 @@ checkpointed_resamples <- function(resamples,
     ))
   }
 
-  eval_split <- function(i) {
-    cf <- ckpt_files[i]
-    if (file.exists(cf)) {
-      chk <- read_verified_checkpoint(cf, split_fps[i], checkpoint_mismatch = "recompute")
-      # A failed fold cached by an earlier version is recomputed, not reused.
-      if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
-        return(chk$value)
-      }
-    }
-    if (!active_mask[i]) {
-      return(NULL)
-    }
-
-    # Construct single-split rset
+  # One single-split rset per resample, built here and handed to the worker
+  # as its input. A worker that held the whole `resamples` would be sent every
+  # split, and `serialize()` writes the data of each split separately: one
+  # copy of the data per resample, to every worker.
+  single_rsets <- lapply(seq_len(n_splits), function(i) {
     single_rset <- resamples[i, , drop = FALSE]
     class(single_rset) <- class(resamples)
     for (a in names(attributes(resamples))) {
@@ -584,12 +577,33 @@ checkpointed_resamples <- function(resamples,
         attr(single_rset, a) <- attr(resamples, a)
       }
     }
+    single_rset
+  })
+
+  eval_split <- function(i, single_rset) {
+    cf <- ckpt_files[i]
+    if (file.exists(cf)) {
+      chk <- read_verified_checkpoint(cf, split_fps[i], checkpoint_mismatch = "recompute")
+      # A failed fold cached by an earlier version is recomputed, not reused.
+      if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
+        # A checkpoint from before 0.11.2 may still hold note backtraces.
+        return(drop_note_traces(chk$value))
+      }
+    }
+    if (!active_mask[i]) {
+      return(NULL)
+    }
 
     res_single <- fit_split(single_rset)
 
     # A fold in which every model failed is returned (so the caller sees
     # tune's notes) but not checkpointed, so a rerun tries it again.
     if (!is_failed_result(res_single)) {
+      # The backtraces tune keeps with each note can reach the frames, and
+      # so the data, of every model that warned: drop them from the result,
+      # in memory and on disk (see drop_note_traces()). A failed fold keeps
+      # them, for debugging.
+      res_single <- drop_note_traces(res_single)
       write_verified_checkpoint(
         res_single, cf, fingerprint = split_fps[i], run_fingerprint = run_fp,
         meta = list(fn = fn, fold_id = fold_ids[i], index = i)
@@ -601,7 +615,7 @@ checkpointed_resamples <- function(resamples,
   eval_split <- with_worker_env(
     eval_split,
     ckpt_files = ckpt_files, split_fps = split_fps, active_mask = active_mask,
-    resamples = resamples, fit_split = fit_split, run_fp = run_fp, fn = fn, fold_ids = fold_ids
+    fit_split = fit_split, run_fp = run_fp, fn = fn, fold_ids = fold_ids
   )
 
   is_parallel <- requireNamespace("future", quietly = TRUE) &&
@@ -612,10 +626,11 @@ checkpointed_resamples <- function(resamples,
   rows <- if (is_parallel) {
     furrr_pkgs <- furrr_worker_packages(objects = worker_objects)
     f_opts <- furrr::furrr_options(seed = TRUE, packages = furrr_pkgs)
-    furrr::future_map(indices, eval_split, .options = f_opts, .progress = progress)
+    furrr::future_map2(indices, single_rsets, eval_split, .options = f_opts, .progress = progress)
   } else {
-    purrr::map(indices, eval_split)
+    purrr::map2(indices, single_rsets, eval_split)
   }
+  rm(single_rsets)
 
   warn_failed_not_checkpointed(rows, fold_ids, fn)
 
@@ -746,7 +761,7 @@ workflow_map_checkpointed <- function(object,
       if (file.exists(ckpt_file)) {
         chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = "recompute")
         if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
-          results_list[[i]] <- chk$value
+          results_list[[i]] <- drop_note_traces(chk$value)
         } else if (identical(chk$status, "mismatch")) {
           warning(
             "Cached result for workflow '", w_id, "' has a mismatched fingerprint and is ignored; ",
@@ -774,7 +789,7 @@ workflow_map_checkpointed <- function(object,
         if (file.exists(ckpt_file)) {
           chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = checkpoint_mismatch)
           if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
-            return(chk$value)
+            return(drop_note_traces(chk$value))
           }
         }
         # Written once, below, and only when it did not fail.
@@ -807,6 +822,8 @@ workflow_map_checkpointed <- function(object,
       )
       if (file.exists(ckpt_file)) unlink(ckpt_file)
     } else {
+      res_i <- drop_note_traces(res_i)
+      results_list[[i]] <- res_i
       write_verified_checkpoint(res_i, ckpt_file, fingerprint = wflow_fps[i], run_fingerprint = run_fp,
                                 meta = list(fn = "workflow_map_checkpointed", wflow_id = w_id))
     }
@@ -900,7 +917,7 @@ tune_race_survival_checkpointed <- function(object,
   if (file.exists(ckpt_file)) {
     chk <- read_verified_checkpoint(ckpt_file, fp, checkpoint_mismatch = checkpoint_mismatch)
     if (identical(chk$status, "hit")) {
-      return(chk$value)
+      return(drop_note_traces(chk$value))
     } else if (identical(chk$status, "mismatch")) {
       message(sprintf(
         "tune_race_survival_checkpointed(): Discarded cached result in '%s' due to mismatched fingerprint. Recomputing...",
@@ -910,7 +927,7 @@ tune_race_survival_checkpointed <- function(object,
     }
   }
 
-  res <- tune_race_survival(object, resamples = resamples, ...)
+  res <- drop_note_traces(tune_race_survival(object, resamples = resamples, ...))
   write_verified_checkpoint(
     res, ckpt_file, fingerprint = fp,
     meta = list(fn = "tune_race_survival_checkpointed")

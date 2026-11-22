@@ -519,6 +519,19 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     }))
   }
 
+  # The fold function travels to the workers with only what it uses: its
+  # enclosing frame holds `data`, the full design matrix and every split, and
+  # `serialize()` writes each split's data separately. Each worker receives
+  # its own splits as the mapped input instead.
+  worker_spec <- spec
+  worker_spec$data <- NULL
+  score_split <- with_worker_env(
+    score_split,
+    covariates = covariates, eval_time = eval_time, gap_mode = gap_mode, glmnet_args = glmnet_args,
+    info = info, metrics = metrics, mixture = mixture, paths = paths, recurrent = recurrent,
+    spec = worker_spec, trunc = trunc
+  )
+
   is_parallel <- isTRUE(parallel) ||
     (is.character(parallel) && parallel %in% c("resamples", "everything", "true")) ||
     (is.list(parallel) && isTRUE(parallel$parallel_over %in% c("resamples", "everything"))) ||
@@ -604,7 +617,7 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
       ))
     }
 
-    eval_split_ckpt <- function(i) {
+    eval_split_ckpt <- function(split, i) {
       sp_id <- fold_ids[i]
       safe_id <- gsub("[^A-Za-z0-9._-]", "_", sp_id)
       cf <- file.path(checkpoint_dir, sprintf("cv_coxnet_%s.rds", safe_id))
@@ -620,7 +633,7 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
         return(NULL)
       }
 
-      val <- score_split(resamples$splits[[i]], sp_id)
+      val <- score_split(split, sp_id)
       if (!is.null(val)) {
         write_verified_checkpoint(
           val, cf, fingerprint = exp_fp, run_fingerprint = run_fp,
@@ -630,11 +643,16 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
       val
     }
 
+    eval_split_ckpt <- with_worker_env(
+      eval_split_ckpt,
+      active_mask = active_mask, checkpoint_dir = checkpoint_dir, fold_ids = fold_ids,
+      run_fp = run_fp, score_split = score_split, split_fps = split_fps
+    )
     results <- if (isTRUE(is_parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "to fit folds in parallel.")
-      furrr::future_map(seq_len(n_splits), eval_split_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
+      furrr::future_map2(resamples$splits, seq_len(n_splits), eval_split_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
     } else {
-      purrr::map(seq_len(n_splits), eval_split_ckpt)
+      purrr::map2(resamples$splits, seq_len(n_splits), eval_split_ckpt)
     }
   } else {
     results <- if (isTRUE(is_parallel)) {
@@ -1058,7 +1076,7 @@ spec_formula <- function(formula, data, subject_id, group) {
   check_id_columns(data, subject_id, group)
   drop <- unique(c(subject_id, group))
   model_data <- function(d) d[setdiff(names(d), drop)]
-  list(
+  spec_without_frame_data(list(
     data = data,
     subject_col = subject_id,
     group_col = group %||% subject_id,
@@ -1070,7 +1088,7 @@ spec_formula <- function(formula, data, subject_id, group) {
       f <- hardhat::forge(model_data(d), blueprint, outcomes = TRUE)
       list(x = predictors_matrix(f$predictors), y = surv_outcome(f$outcomes))
     }
-  )
+  ))
 }
 
 spec_recipe <- function(recipe, data, subject_id, group) {
@@ -1095,7 +1113,7 @@ spec_recipe <- function(recipe, data, subject_id, group) {
       )
     }
   }
-  list(
+  spec_without_frame_data(list(
     data = data,
     subject_col = subject_id,
     group_col = group %||% subject_id,
@@ -1108,7 +1126,27 @@ spec_recipe <- function(recipe, data, subject_id, group) {
       f <- hardhat::forge(d, blueprint, outcomes = TRUE)
       list(x = predictors_matrix(f$predictors), y = surv_outcome(f$outcomes))
     }
-  )
+  ))
+}
+
+#' Drop `data` From the Frame a Coxnet Spec's Closures Enclose
+#'
+#' `fit_frame()` and `new_frame()` are defined in the frame of
+#' `spec_formula()` / `spec_recipe()`, whose `data` argument they do not use.
+#' Without this, a spec sent to a parallel worker (or saved) would carry that
+#' data inside its closures, besides the copy in `spec$data`.
+#'
+#' @param spec The spec list, built in the caller's frame.
+#' @return `spec`.
+#' @keywords internal
+#' @noRd
+spec_without_frame_data <- function(spec) {
+  force(spec)
+  frame <- parent.frame()
+  if (exists("data", envir = frame, inherits = FALSE)) {
+    rm("data", envir = frame)
+  }
+  spec
 }
 
 make_coxnet_spec <- function(preprocessor, data, subject_id, group) {

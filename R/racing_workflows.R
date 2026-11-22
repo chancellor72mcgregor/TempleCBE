@@ -243,7 +243,7 @@ tune_race_survival <- function(object,
   if (!is.null(ckpt_file) && file.exists(ckpt_file)) {
     chk <- read_verified_checkpoint(ckpt_file, fp, checkpoint_mismatch = checkpoint_mismatch)
     if (identical(chk$status, "hit")) {
-      return(chk$value)
+      return(drop_note_traces(chk$value))
     }
   }
 
@@ -272,6 +272,8 @@ tune_race_survival <- function(object,
   )
 
   if (!is.null(ckpt_file)) {
+    # Without its notes' backtraces, in memory as on disk (see drop_note_traces()).
+    res <- drop_note_traces(res)
     write_verified_checkpoint(
       res, ckpt_file, fingerprint = fp,
       meta = list(fn = "tune_race_survival", call_fn = call_fn)

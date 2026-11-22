@@ -215,7 +215,7 @@ loco_mp_coxnet <- function(formula = NULL,
     y_train <- y_surv[idx_in]
 
     fit <- tryCatch({
-      coxnet(x = x_train, y = y_train, mixture = mixture, penalty = penalty, ...)
+      do.call(coxnet, c(list(x = x_train, y = y_train, mixture = mixture, penalty = penalty), coxnet_dots))
     }, error = function(e) e)
     if (inherits(fit, "error")) return(patch_failure(fit))
 
@@ -244,6 +244,15 @@ loco_mp_coxnet <- function(formula = NULL,
     )
   }
 
+  # A patch needs the design matrix and the outcome, not `data`, the model
+  # frame, the censoring weights or the rest of this frame, which `future`
+  # would otherwise send to every worker with the function.
+  fit_one_patch <- with_worker_env(
+    fit_one_patch,
+    subj_ids = subj_ids, n_patch = n_patch, row_key = row_key, p_total = p_total, m_patch = m_patch,
+    x_mat = x_mat, y_surv = y_surv, mixture = mixture, penalty = penalty, coxnet_dots = list(...),
+    n_eval = n_eval, eval_time = eval_time, covariates = covariates
+  )
   patches <- if (isTRUE(parallel) && requireNamespace("furrr", quietly = TRUE)) {
     furrr::future_map(seq_len(B), fit_one_patch, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
   } else {

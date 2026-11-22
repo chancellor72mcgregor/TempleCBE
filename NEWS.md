@@ -1,3 +1,22 @@
+# TempleCBE 0.11.2
+
+Smaller checkpoints and less data sent to parallel workers. Like 0.11.1, nothing here depends on forking, so it applies alike on Windows, macOS, Linux x86-64 and Linux ARM64 (DGX Spark).
+
+## Changes in behaviour
+
+* **Checkpointed tuning results are saved, and returned, without tune's note backtraces.** Since tune 2.0.0 each warning or error that tune catches is kept in `.notes` with an rlang backtrace (`trace`). The backtrace keeps the calls of the stack, and the call of a frame that evaluated a quosure is that quosure, with its environment: a data mask or a model-fitting frame, which holds the training data. Each note can reach its own frame and `saveRDS()` writes them all, so a workflow with a warning per model and fold was saved with many copies of the data (595 MB per workflow in one 127-workflow `workflow_map_checkpointed()` run, against about 46 MB without the backtraces), and once read back those copies no longer share memory. `tune_grid_checkpointed()`, `fit_resamples_checkpointed()`, `workflow_map_checkpointed()`, `tune_race_survival_checkpointed()`, `tune_race_survival()` with a `checkpoint_dir`, `checkpoint_map()` and every other checkpoint written through `write_verified_checkpoint()` now set each `trace` to `NULL`. The `location`, `type` and `note` columns and the `trace` column itself are kept, so `collect_notes()`, `show_notes()`, `collect_metrics()`, `collect_predictions()`, `select_best()`, `show_best()`, `autoplot()` and `fit_best()` work as before (tested with tune 2.1.0); only the backtrace that `collect_notes()` used to show in `trace` is gone. A fold in which every model failed keeps its backtraces (it is returned but never checkpointed), and a result loaded from a checkpoint written by an earlier version is slimmed as it is read. Set `options(templecbe.keep_note_traces = TRUE)` to keep every backtrace, for example while tracking down a warning. Without a `checkpoint_dir` the wrappers return tune's result untouched.
+* **The tuning parameter set (`attr(x, "parameters")`) is not slimmed.** tune reads it in `autoplot()` (the parameters' labels and transformations), `select_best()`, `show_best()`, `fit_best()`, `finalize_*()` and when a search is continued, so it cannot be dropped; in our tests it was about 20 KB.
+
+## New features
+
+* **`compact_checkpoints()`** rewrites checkpoint files already on disk without the backtraces, keeping every fingerprint, so a long run written by 0.11.1 or earlier gets the smaller files without being recomputed. It walks subdirectories by default (one per workflow for `workflow_map_checkpointed()`), replaces a file only when the new one is smaller, writes it beside the old one and renames it into place, and has a `dry_run`.
+
+## Fixes
+
+* **Parallel workers no longer receive every resample.** The worker function of `tune_grid_checkpointed()` / `fit_resamples_checkpointed()` (and so of `workflow_map_checkpointed()`), of `cv_coxnet()`, of `cv_joint_model()` and of `nested_cv_joint_model()` held the whole `rset` (and, for the nested model, every inner resample), so each worker was sent every split; `serialize()` writes the data of each split separately, which made one copy of the data per resample, per worker. Each worker is now given its own splits as the mapped input, and its function an environment with only what it uses.
+* **`cv_coxnet()`, `loco_mp_coxnet()`, `cv_joint_model()` and `nested_cv_joint_model()` worker functions no longer capture their caller's frame**, which held `data`, the full design matrix, the censoring weights and the resamples; they are built with the same `with_worker_env()` as the checkpointed tidymodels wrappers in 0.11.1. The `fit_frame()` / `new_frame()` closures of the internal coxnet spec no longer keep the data they were built from either.
+* **Tests:** `test-checkpoint_slim.R` covers the backtrace removal (on stand-in results and on real tune results, checking `collect_notes()`, `show_notes()`, `collect_metrics()`, `select_best()`, `autoplot()` and `fit_best()`), the opt-out option, `compact_checkpoints()`, and that the resample worker no longer holds `resamples`.
+
 # TempleCBE 0.11.1
 
 Fixes for parallel (`multisession` / PSOCK) workers, found with `workflow_map_checkpointed()` and audited across every `furrr` call in the package. Nothing here depends on forking, so it applies alike on Windows, macOS, Linux x86-64 and Linux ARM64 (DGX Spark).

@@ -183,6 +183,7 @@ reference:
       - tune_race_survival_checkpointed
       - collect_checkpoints
       - clean_checkpoints
+      - compact_checkpoints
       - invalidate_downstream_checkpoints
       - estimate_runtime
       - nested_survival_run

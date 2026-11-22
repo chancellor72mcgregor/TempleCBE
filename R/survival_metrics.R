@@ -1014,6 +1014,10 @@ write_verified_checkpoint <- function(obj,
                                       run_fingerprint = fingerprint,
                                       meta = list()) {
   seed_scheme <- meta$seed_scheme %||% current_seed_scheme()
+  # Every checkpoint is written without tune's note backtraces, which can
+  # reach (and so save) the data of every model that warned. The call sites
+  # that return a tuning result drop them from it as well.
+  obj <- drop_note_traces(obj)
   attr(obj, "checkpoint_fingerprint") <- as.character(fingerprint)
   attr(obj, "checkpoint_run_fingerprint") <- as.character(run_fingerprint)
   attr(obj, "seed_scheme") <- as.character(seed_scheme)
