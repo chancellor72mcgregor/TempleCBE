@@ -457,7 +457,10 @@ tune_start_stop_impl <- function(object, resamples, subject_id, grid, metrics, e
     out$.predictions <- lapply(results, `[[`, "preds")
   }
   if (all(vapply(out$.metrics, nrow, integer(1)) == 0)) {
-    stop("No resample could be scored; see `.notes` of a failed run with `save_pred`, or the fits' errors.", call. = FALSE)
+    first_note <- unlist(lapply(results, `[[`, "notes"))[1]
+    stop("No resample could be scored",
+         if (!is.na(first_note %||% NA)) paste0("; the first problem: ", first_note) else ".",
+         call. = FALSE)
   }
   if (!is.null(race_info)) {
     # As in finetune, eliminated candidates' metrics are kept but the

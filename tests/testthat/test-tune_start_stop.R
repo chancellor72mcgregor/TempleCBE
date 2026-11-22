@@ -134,3 +134,43 @@ test_that("start/stop tuning refuses leaking resamples and unsupported models", 
   expect_error(fit_resamples_start_stop(sr, folds, "subject_id"), "proportional_hazards")
   expect_error(fit_resamples_start_stop(wf, folds, "nope"), "subject_id")
 })
+
+test_that("workflow_map_checkpointed() maps start/stop drivers over a workflow set", {
+  skip_if_no_start_stop_tune_deps()
+  skip_if_not_installed("workflowsets")
+  d <- sim_counting(n = 80, seed = 26)
+  folds <- withr::with_seed(4, rsample::group_vfold_cv(d, group = subject_id, v = 3))
+  net <- parsnip::proportional_hazards(penalty = tune::tune(), mixture = 1) |>
+    parsnip::set_engine("glmnet") |>
+    parsnip::set_mode("censored regression")
+  wset <- workflowsets::workflow_set(
+    preproc = list(small = survival::Surv(tstart, tstop, status) ~ x1 + x2,
+                   full = survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3),
+    models = list(net = net)
+  )
+  wset <- workflowsets::option_add(wset, grid = data.frame(penalty = c(0.1, 0.01)))
+  res <- workflow_map_checkpointed(wset, fn = "tune_grid_start_stop", resamples = folds,
+                                   subject_id = "subject_id", eval_time = c(3, 6, 9))
+  expect_true(all(vapply(res$result, inherits, logical(1), "tune_results")))
+  expect_equal(nrow(tune::collect_metrics(res$result[[2]])), 2 * 2)
+
+  dir <- withr::local_tempdir()
+  ck <- workflow_map_checkpointed(wset, fn = "tune_grid_start_stop", resamples = folds,
+                                  subject_id = "subject_id", eval_time = c(3, 6, 9), checkpoint_dir = dir)
+  expect_equal(tune::collect_metrics(ck$result[[1]])$mean, tune::collect_metrics(res$result[[1]])$mean)
+  expect_true(file.exists(file.path(dir, ck$wflow_id[1], "workflow_result.rds")))
+  ranked <- workflowsets::rank_results(ck, rank_metric = "brier_survival_integrated")
+  expect_gt(nrow(ranked), 0)
+
+  # a workflow that cannot be fit (glmnet needs two predictors) fails alone
+  bad <- workflowsets::workflow_set(
+    preproc = list(one = survival::Surv(tstart, tstop, status) ~ x1), models = list(net = net)
+  )
+  bad <- workflowsets::option_add(bad, grid = data.frame(penalty = 0.1))
+  expect_warning(
+    out <- workflow_map_checkpointed(bad, fn = "tune_grid_start_stop", resamples = folds,
+                                     subject_id = "subject_id", eval_time = c(3, 6, 9)),
+    "first problem: fit failed"
+  )
+  expect_s3_class(out$result[[1]], "error")
+})

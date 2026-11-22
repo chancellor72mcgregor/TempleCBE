@@ -769,7 +769,7 @@ workflow_set_option <- function(object, i) {
 # dropped; arguments given in the call are passed on as before.
 #' @noRd
 workflow_call_args <- function(dots, option, fn) {
-  if (identical(fn, "fit_resamples") && length(option) > 0L) {
+  if (fn %in% c("fit_resamples", "fit_resamples_start_stop") && length(option) > 0L) {
     option <- option[names(option) %in% c("resamples", "metrics", "control", "eval_time")]
   }
   args <- option
@@ -778,6 +778,19 @@ workflow_call_args <- function(dots, option, fn) {
   }
   # Arguments of the call first, as before, then the options they did not set.
   c(args[names(args) %in% names(dots)], args[!names(args) %in% names(dots)])
+}
+
+# One start/stop driver call for a workflow of a set. As in
+# workflowsets::workflow_map(), a workflow that errors does not stop the
+# others: its result is the error, which is never checkpointed.
+run_start_stop_workflow <- function(fn, workflow, args, wflow_id) {
+  tryCatch(
+    do.call(fn, c(list(object = workflow), args)),
+    error = function(e) {
+      warning("Workflow '", wflow_id, "' failed: ", conditionMessage(e), call. = FALSE)
+      e
+    }
+  )
 }
 
 #' Checkpointed Workflow Sets Mapping (`workflow_map_checkpointed`)
@@ -795,7 +808,11 @@ workflow_call_args <- function(dots, option, fn) {
 #' (`param_info`, `grid`, ...) are dropped, as in `workflow_map()`.
 #'
 #' @param object A `workflow_set` object.
-#' @param fn Function to apply to each workflow (default `"tune_grid"`).
+#' @param fn Function to apply to each workflow (default `"tune_grid"`). The start/stop
+#'   drivers `"tune_grid_start_stop"`, `"tune_race_start_stop"` and
+#'   `"fit_resamples_start_stop"` are mapped here too (with or without
+#'   `checkpoint_dir`), since [workflowsets::workflow_map()] accepts only
+#'   tune's functions; pass `resamples` and `subject_id` in `...`.
 #' @param ... Arguments passed to `fn`, for every workflow (they override the
 #'   workflow's own [workflowsets::option_add()] options of the same name).
 #' @param seed Optional integer seed (default `1L`) used to set a reproducible RNG seed per workflow.
@@ -825,6 +842,23 @@ workflow_map_checkpointed <- function(object,
   rlang::check_installed("workflowsets", reason = "for workflow_map_checkpointed().")
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
 
+  start_stop_fns <- c("tune_grid_start_stop", "tune_race_start_stop", "fit_resamples_start_stop")
+  if (is.null(checkpoint_dir) && fn %in% start_stop_fns) {
+    # workflowsets::workflow_map() knows only tune's functions, so the
+    # start/stop drivers are mapped here, with each workflow's options.
+    if (!inherits(object, "workflow_set")) {
+      stop("`object` must be a workflow_set object.", call. = FALSE)
+    }
+    dots <- list(...)
+    object$result <- lapply(seq_len(nrow(object)), function(i) {
+      run <- function() run_start_stop_workflow(
+        fn, object$info[[i]]$workflow[[1]], workflow_call_args(dots, workflow_set_option(object, i), fn),
+        object$wflow_id[i]
+      )
+      if (!is.null(seed)) with_local_seed(as.integer(seed) + i - 1L, run()) else run()
+    })
+    return(object)
+  }
   if (is.null(checkpoint_dir)) {
     # `seed` and `verbose` are this function's own arguments, so they never
     # reach `...`: forward them, or workflow_map() draws a random seed.
@@ -920,6 +954,16 @@ workflow_map_checkpointed <- function(object,
           list(object = w_spec, checkpoint_dir = w_dir, checkpoint_mismatch = checkpoint_mismatch, progress = progress),
           w_args
         ))
+      } else if (fn %in% start_stop_fns) {
+        ckpt_file <- file.path(w_dir, "workflow_result.rds")
+        if (file.exists(ckpt_file)) {
+          chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = checkpoint_mismatch)
+          if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
+            return(chk$value)
+          }
+        }
+        if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
+        run_start_stop_workflow(fn, w_spec, w_args, w_id)
       } else {
         ckpt_file <- file.path(w_dir, "workflow_result.rds")
         if (file.exists(ckpt_file)) {

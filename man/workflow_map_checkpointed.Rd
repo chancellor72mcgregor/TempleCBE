@@ -19,7 +19,11 @@ workflow_map_checkpointed(
 \arguments{
 \item{object}{A `workflow_set` object.}
 
-\item{fn}{Function to apply to each workflow (default `"tune_grid"`).}
+\item{fn}{Function to apply to each workflow (default `"tune_grid"`). The start/stop
+drivers `"tune_grid_start_stop"`, `"tune_race_start_stop"` and
+`"fit_resamples_start_stop"` are mapped here too (with or without
+`checkpoint_dir`), since [workflowsets::workflow_map()] accepts only
+tune's functions; pass `resamples` and `subject_id` in `...`.}
 
 \item{...}{Arguments passed to `fn`, for every workflow (they override the
 workflow's own [workflowsets::option_add()] options of the same name).}
