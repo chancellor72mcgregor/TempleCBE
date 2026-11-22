@@ -1162,7 +1162,7 @@ run_checkpointed_sweep <- function(compute, n,
       if (!is.null(reason)) {
         rlang::check_installed(c("furrr", "future"), reason = reason)
       }
-      furrr::future_map(indices, fn, .options = furrr::furrr_options(seed = furrr_seed))
+      furrr::future_map(indices, fn, .options = furrr::furrr_options(seed = furrr_seed, packages = furrr_worker_packages()))
     } else {
       purrr::map(indices, fn)
     }
@@ -1220,12 +1220,180 @@ validate_shard_spec <- function(shard) {
   as.integer(shard)
 }
 
+#' Packages to Attach on `furrr` Workers
+#'
+#' A fresh `multisession` / `cluster` (PSOCK) worker starts with only the base
+#' packages attached. That is the default plan on Windows and the only
+#' portable one, and it differs from a forked (`multicore`) worker, which
+#' inherits the caller's search path. Code that resolves a function from the
+#' search path, such as recipe selectors (`all_numeric_predictors()`), parsnip
+#' engines registered by an extension package (censored, baguette, TempleCBE's
+#' `coxnet`), or `Surv()` in a formula built in the global environment, then
+#' fails on every worker with "could not find function". The packages
+#' returned here are passed to [furrr::furrr_options()] so the worker attaches
+#' them first.
+#'
+#' The set is: `pkgs` (survival, modelling and tidymodels packages); the
+#' packages `generics::required_pkgs()` reports for each workflow, model spec,
+#' recipe or workflow set in `objects` (model engines such as ranger or aorsf,
+#' recipe-step packages such as embed or themis); `extra`; the option
+#' `templecbe.worker_packages`; and, with `session = TRUE`, the packages
+#' attached in the calling session, so a worker sees the functions the caller
+#' sees. Packages that are not installed in the library paths the worker
+#' uses are dropped (a package loaded with `pkgload::load_all()` and not
+#' installed cannot be attached by a worker).
+#'
+#' @param pkgs Character vector of base packages.
+#' @param objects A list of objects (or one object) to ask for required packages.
+#' @param extra Further packages.
+#' @param session Also attach the packages attached in the calling session
+#'   (option `templecbe.worker_session_packages`, default `TRUE`).
+#' @return A character vector, empty under a sequential plan.
+#' @keywords internal
 #' @noRd
-furrr_worker_packages <- function(pkgs = c("rsample", "yardstick", "survival", "glmnet", "dplyr", "TempleCBE")) {
+furrr_worker_packages <- function(pkgs = default_worker_packages(),
+                                  objects = list(),
+                                  extra = character(),
+                                  session = getOption("templecbe.worker_session_packages", TRUE)) {
   if (!requireNamespace("future", quietly = TRUE) || inherits(future::plan(), "sequential")) {
     return(character(0))
   }
-  Filter(function(p) nzchar(system.file(package = p)), pkgs)
+  if (!is.list(objects) || is.object(objects)) {
+    objects <- list(objects)
+  }
+  req <- unlist(lapply(objects, object_required_pkgs), use.names = FALSE)
+  attached <- if (isTRUE(session)) session_attached_packages() else character()
+  all_pkgs <- unique(c(
+    attached,
+    pkgs,
+    req,
+    as.character(extra),
+    as.character(getOption("templecbe.worker_packages", character()))
+  ))
+  all_pkgs <- all_pkgs[!is.na(all_pkgs) & nzchar(all_pkgs)]
+  Filter(worker_package_installed, all_pkgs)
+}
+
+#' @noRd
+default_worker_packages <- function() {
+  c(
+    "survival", "glmnet", "dplyr", "rsample", "yardstick",
+    "recipes", "parsnip", "workflows", "tune", "censored",
+    "TempleCBE"
+  )
+}
+
+# Packages attached in the calling session, oldest first so the worker's
+# search path masks the same way the caller's does. Base packages are attached
+# on every worker already.
+#' @noRd
+session_attached_packages <- function() {
+  attached <- sub("^package:", "", grep("^package:", search(), value = TRUE))
+  base <- c("base", "stats", "graphics", "grDevices", "utils", "datasets", "methods")
+  rev(setdiff(attached, base))
+}
+
+# Installed in the library paths the worker inherits (`.libPaths()`). Uses
+# find.package() with an explicit lib.loc, which pkgload does not shim, so a
+# package that is only load_all()-ed does not count as installed.
+#' @noRd
+worker_package_installed <- function(pkg) {
+  length(find.package(pkg, lib.loc = .libPaths(), quiet = TRUE)) > 0L
+}
+
+# Packages a tidymodels object needs on a worker: generics::required_pkgs() for
+# a workflow, model spec, model fit, recipe or recipe step, each workflow of a
+# workflow set, and, one level down, the elements of a plain list (such as a
+# list of `...` arguments). Anything else contributes nothing; a failing
+# method is ignored rather than failing the caller.
+#' @noRd
+object_required_pkgs <- function(x, depth = 0L) {
+  if (is.null(x)) {
+    return(character())
+  }
+  if (inherits(x, "workflow_set")) {
+    wfs <- tryCatch(lapply(x$info, function(inf) inf$workflow[[1]]), error = function(e) list())
+    return(unique(unlist(lapply(wfs, object_required_pkgs, depth = depth + 1L), use.names = FALSE)))
+  }
+  if (inherits(x, "workflow")) {
+    # The workflow's own method, plus its model spec and recipe asked
+    # directly: an untrained workflow's method does not report the engine
+    # package in every workflows version.
+    parts <- list(
+      x,
+      tryCatch(workflows::extract_spec_parsnip(x), error = function(e) NULL),
+      tryCatch(workflows::extract_preprocessor(x), error = function(e) NULL)
+    )
+    return(unique(unlist(lapply(parts, safe_required_pkgs), use.names = FALSE)))
+  }
+  if (inherits(x, c("model_spec", "model_fit", "recipe", "step"))) {
+    return(safe_required_pkgs(x))
+  }
+  if (is.list(x) && !is.object(x) && depth < 2L) {
+    return(unique(unlist(lapply(x, object_required_pkgs, depth = depth + 1L), use.names = FALSE)))
+  }
+  character()
+}
+
+# generics::required_pkgs() of a tidymodels object, or nothing when there is
+# no method or it fails.
+#' @noRd
+safe_required_pkgs <- function(x) {
+  if (is.null(x) || !inherits(x, c("workflow", "model_spec", "model_fit", "recipe", "step"))) {
+    return(character())
+  }
+  pk <- tryCatch(generics::required_pkgs(x, infra = TRUE), error = function(e) {
+    tryCatch(generics::required_pkgs(x), error = function(e) character())
+  })
+  unique(as.character(pk))
+}
+
+#' Did a Fold, Fit or Task Fail?
+#'
+#' A failed result must not be written as a checkpoint: a checkpoint is reused
+#' on every rerun with the same fingerprint, so a transient or environment
+#' failure (a package missing on a worker, say) would be replayed forever. A
+#' result counts as failed when it is a `try-error` or an error condition, or a
+#' `tune_results` / `resample_results` object in which no resample produced a
+#' metric (tune's "All models failed").
+#'
+#' @param x A result.
+#' @return `TRUE` or `FALSE`.
+#' @keywords internal
+#' @noRd
+is_failed_result <- function(x) {
+  if (inherits(x, c("try-error", "error"))) {
+    return(TRUE)
+  }
+  if (inherits(x, "tune_results") && ".metrics" %in% names(x)) {
+    if (nrow(x) == 0L) {
+      return(TRUE)
+    }
+    return(all(vapply(x$.metrics, function(m) is.null(m) || NROW(m) == 0L, logical(1))))
+  }
+  FALSE
+}
+
+#' First Error Message Recorded in a Failed Result
+#' @noRd
+failed_result_message <- function(x) {
+  if (inherits(x, "try-error")) {
+    return(trimws(as.character(x)[1]))
+  }
+  if (inherits(x, "error")) {
+    return(conditionMessage(x))
+  }
+  if (inherits(x, "tune_results") && ".notes" %in% names(x)) {
+    for (nt in x$.notes) {
+      if (is.data.frame(nt) && nrow(nt) > 0L && "note" %in% names(nt)) {
+        errs <- if ("type" %in% names(nt)) nt$note[nt$type == "error"] else nt$note
+        if (length(errs) > 0L) {
+          return(trimws(as.character(errs[1])))
+        }
+      }
+    }
+  }
+  NA_character_
 }
 
 #' Tune a Penalized Cox Model Over a Grid of `alpha` Values
@@ -1305,7 +1473,7 @@ tune_over_alpha <- function(object,
       dir.create(checkpoint_dir, recursive = TRUE, showWarnings = FALSE)
     }
 
-    furrr_pkgs <- furrr_worker_packages()
+    furrr_pkgs <- furrr_worker_packages(objects = dots)
 
     if (!is.null(formulas)) {
       if ("formula" %in% names(dots)) {
@@ -1740,7 +1908,7 @@ tune_alpha_by_split <- function(object,
     on.exit(unlink(shared_wb$bundle_file), add = TRUE)
 
     is_parallel_plan <- requireNamespace("future", quietly = TRUE) && !inherits(future::plan(), "sequential")
-    furrr_pkgs <- furrr_worker_packages()
+    furrr_pkgs <- furrr_worker_packages(objects = dots)
 
     # Construct worker function in a minimal environment so `future` does not
     # serialize the parent frame (`object`, `dots`, `splits_canon`, etc.)

@@ -311,7 +311,7 @@ score_outer <- function(object,
         }
       }, add = TRUE)
 
-      furrr_pkgs <- furrr_worker_packages()
+      furrr_pkgs <- furrr_worker_packages(objects = base_dots)
 
       score_one_task <- local({
         tasks <- tasks

@@ -632,14 +632,14 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
 
     results <- if (isTRUE(is_parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "to fit folds in parallel.")
-      furrr::future_map(seq_len(n_splits), eval_split_ckpt, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map(seq_len(n_splits), eval_split_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
     } else {
       purrr::map(seq_len(n_splits), eval_split_ckpt)
     }
   } else {
     results <- if (isTRUE(is_parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "to fit folds in parallel.")
-      furrr::future_map2(resamples$splits, fold_ids, score_split, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map2(resamples$splits, fold_ids, score_split, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
     } else {
       purrr::map2(resamples$splits, fold_ids, score_split)
     }

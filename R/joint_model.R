@@ -878,14 +878,14 @@ cv_joint_model <- function(data,
 
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel joint cross-validation.")
-      furrr::future_map(fold_ids, eval_fold_ckpt, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map(fold_ids, eval_fold_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
     } else {
       purrr::map(fold_ids, eval_fold_ckpt)
     }
   } else {
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel joint cross-validation.")
-      furrr::future_map(fold_ids, run_fold, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map(fold_ids, run_fold, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
     } else {
       purrr::map(fold_ids, run_fold)
     }
@@ -1091,14 +1091,14 @@ nested_cv_joint_model <- function(object,
 
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel nested cross-validation.")
-      furrr::future_map(outer_ids, eval_outer_ckpt, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map(outer_ids, eval_outer_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
     } else {
       purrr::map(outer_ids, eval_outer_ckpt)
     }
   } else {
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel nested cross-validation.")
-      furrr::future_map(outer_ids, run_outer, .options = furrr::furrr_options(seed = TRUE))
+      furrr::future_map(outer_ids, run_outer, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
     } else {
       purrr::map(outer_ids, run_outer)
     }
@@ -1320,4 +1320,19 @@ autoplot.cv_joint_model <- function(object, ...) {
     ggplot2::theme(legend.position = "none")
 
   p1
+}
+
+# Packages a joint-model fold needs on a fresh (multisession / PSOCK) worker:
+# the bagged-tree engines are registered by baguette (rpart fits them), and
+# racing the Cox penalty needs finetune with censored's engines.
+#' @noRd
+joint_worker_packages <- function(engine, tune_method = "none") {
+  extra <- character()
+  if (engine %in% c("baguette", "stacks")) {
+    extra <- c(extra, "baguette", "rpart")
+  }
+  if (!identical(tune_method, "none")) {
+    extra <- c(extra, "finetune")
+  }
+  furrr_worker_packages(extra = extra)
 }
