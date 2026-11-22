@@ -6,7 +6,13 @@
 #' for an event, 0 for censored, and `NA` for the other groups.
 #'
 #' @param x A data frame, or a path to an `.xlsx`, `.xls`, `.csv`, or `.txt`
-#'   file, with one row per time per group.
+#'   file, with one row per time per group; or a fitted Kaplan-Meier curve
+#'   (`survival::survfit()` or `ggsurvfit::survfit2()`), which is tabulated
+#'   with `summary(x, censored = TRUE)`. A curve without strata (`~ 1`) is one
+#'   group, named `"Overall"`; a curve stratified by one variable has its
+#'   groups named by their values (`"Female"` rather than `"sex=Female"`), as
+#'   [ggsurvfit::tidy_survfit()] names them. The column arguments are ignored
+#'   for a curve.
 #' @param sheet Sheet name or index when `x` is an Excel file.
 #' @param time_col,strata_col,n_event_col,n_censor_col Column names of the
 #'   time, group, number of events, and number censored.
@@ -20,6 +26,8 @@
 #'   `writexl`).
 #' @param out_xlsx_paste Optional path to write a copy with blanks instead of
 #'   `NA`, convenient for pasting into Prism.
+#' @param out_csv Optional path to write the table as CSV, with blanks instead
+#'   of `NA` (`na = ""`), which GraphPad Prism imports directly.
 #' @return A data frame with column `X` and one integer column per group,
 #'   with a `"notes"` attribute describing the layout.
 #' @export
@@ -30,6 +38,8 @@
 #'   km <- data.frame(time = s$time, strata = s$strata, n.risk = s$n.risk,
 #'                    n.event = s$n.event, n.censor = s$n.censor)
 #'   head(km_summary_to_prism(km))
+#'   # or straight from the fitted curve
+#'   head(km_summary_to_prism(fit))
 #' }
 km_summary_to_prism <- function(x,
                                 sheet = NULL,
@@ -41,8 +51,19 @@ km_summary_to_prism <- function(x,
                                 drop_time0 = TRUE,
                                 validate_totals = TRUE,
                                 out_xlsx = NULL,
-                                out_xlsx_paste = NULL) {
-  df <- read_km_summary(x, sheet)
+                                out_xlsx_paste = NULL,
+                                out_csv = NULL) {
+  if (inherits(x, "survfit")) {
+    df <- km_summary_from_survfit(x)
+    time_col <- "time"
+    strata_col <- "strata"
+    n_event_col <- "n.event"
+    n_censor_col <- "n.censor"
+    # the curve's own group order, not alphabetical
+    if (is.null(strata_levels)) strata_levels <- attr(df, "group_levels")
+  } else {
+    df <- read_km_summary(x, sheet)
+  }
 
   needed <- c(time_col, strata_col, n_event_col, n_censor_col)
   missing_cols <- setdiff(needed, names(df))
@@ -99,11 +120,56 @@ km_summary_to_prism <- function(x,
     pasted[groups] <- lapply(pasted[groups], function(col) ifelse(is.na(col), "", col))
     writexl::write_xlsx(pasted, out_xlsx_paste)
   }
+  if (!is.null(out_csv)) {
+    utils::write.csv(out, out_csv, row.names = FALSE, na = "")
+  }
 
   attr(out, "notes") <- c(
     "Prism survival table: X = time; one column per group; 1 = event, 0 = censored; one non-missing group value per row.",
     "Paste or import into a Prism 'Survival' table; Prism builds the Kaplan-Meier curves and log-rank tests."
   )
+  out
+}
+
+#' Tabulate a Fitted Kaplan-Meier Curve for km_summary_to_prism()
+#'
+#' One row per time per group with `n.risk`, `n.event` and `n.censor`, from
+#' `summary(fit, censored = TRUE)`. Multi-state and competing-risk curves are
+#' refused: Prism's survival table holds one event type.
+#'
+#' @keywords internal
+#' @noRd
+km_summary_from_survfit <- function(fit) {
+  if (inherits(fit, c("survfitms", "survfitcox")) || !is.null(fit$states) && length(fit$states) > 1L) {
+    stop("`x` must be a Kaplan-Meier `survfit()` curve of one event type; ",
+         "multi-state, competing-risk and Cox-model curves cannot be written as a Prism survival table.",
+         call. = FALSE)
+  }
+  s <- summary(fit, censored = TRUE)
+  n <- length(s$time)
+  strata <- if (is.null(s$strata)) rep("Overall", n) else as.character(s$strata)
+  group_levels <- if (is.null(s$strata)) "Overall" else levels(s$strata)
+  if (!is.null(s$strata)) {
+    # "sex=Female" -> "Female" when the curve is stratified by one variable
+    # (several are joined with ", ", and then the full label is kept).
+    lev <- levels(s$strata)
+    if (length(lev) > 0L && all(grepl("^[^=,]+=", lev)) && !any(grepl(", [^=,]+=", lev))) {
+      stripped <- sub("^[^=,]+=", "", lev)
+      if (!anyDuplicated(stripped)) {
+        strata <- stripped[match(strata, lev)]
+        group_levels <- stripped
+      }
+    }
+  }
+  out <- data.frame(
+    time = s$time,
+    strata = strata,
+    n.risk = s$n.risk,
+    n.event = s$n.event,
+    n.censor = s$n.censor,
+    stringsAsFactors = FALSE
+  )
+  attr(out, "group_levels") <- group_levels
   out
 }
 

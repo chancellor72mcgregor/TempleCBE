@@ -719,10 +719,16 @@ check_docx_toolchain <- function(quiet = FALSE) {
 #'   available. Set \code{FALSE} to warn and skip instead; a skipped row comes
 #'   back with \code{converted = FALSE}.
 #' @param timeout Seconds a converter may take on one file before it is
-#'   stopped; it applies to every backend (python, LibreOffice and Word COM).
+#'   stopped. A single number applies to every backend (python, LibreOffice
+#'   and Word COM); a named vector such as \code{c(python = 120, libreoffice = 600)}
+#'   sets each backend's own limit (a backend it does not name gets 600 s), so
+#'   a heavy PDF can fail over from pdf2docx to LibreOffice sooner. The
+#'   default is the \code{templecbe.docx_timeout} option, else 600, so
+#'   \code{options(templecbe.docx_timeout = ...)} also reaches the conversions
+#'   that [render_pipeline()] and [zip_reports()] make.
 #'   A file that times out gets a warning that says so and comes back with
 #'   \code{converted = FALSE} (the python backend then retries it once with
-#'   LibreOffice, which gets its own \code{timeout}). Stopping a converter
+#'   LibreOffice, under LibreOffice's own \code{timeout}). Stopping a converter
 #'   stops the process that was started; any process that one started in turn
 #'   (LibreOffice's \code{soffice.bin}, or the Word instance behind Word COM)
 #'   may keep running and has to be closed by hand.
@@ -734,14 +740,12 @@ check_docx_toolchain <- function(quiet = FALSE) {
 convert_pdfs_to_docx <- function(conversions,
                                  backend = "auto",
                                  strict = TRUE,
-                                 timeout = 600) {
+                                 timeout = getOption("templecbe.docx_timeout", 600)) {
   valid_backends <- c("auto", "python", "libreoffice", "word_com")
   if (!is.character(backend) || length(backend) != 1L || !(backend %in% valid_backends)) {
     stop(paste0("'backend' must be one of: ", paste(paste0('"', valid_backends, '"'), collapse = ", ")), call. = FALSE)
   }
-  if (!is.numeric(timeout) || length(timeout) != 1L || is.na(timeout) || timeout <= 0) {
-    stop("'timeout' must be a single positive number of seconds.", call. = FALSE)
-  }
+  timeouts <- .backend_timeouts(timeout)
 
   if (is.null(conversions)) {
     return(data.frame(src = character(0), dest = character(0), converted = logical(0), stringsAsFactors = FALSE))
@@ -826,16 +830,16 @@ convert_pdfs_to_docx <- function(conversions,
     message("  [", i, "/", nrow(conversions), "] ", basename(pdf))
 
     ok <- switch(backend,
-      python      = .convert_python(state$python_with_pdf2docx, pdf, docx, timeout = timeout),
-      libreoffice = .convert_soffice(state$soffice, pdf, docx, timeout = timeout),
-      word_com    = .convert_word_com(pdf, docx, timeout = timeout),
+      python      = .convert_python(state$python_with_pdf2docx, pdf, docx, timeout = timeouts[["python"]]),
+      libreoffice = .convert_soffice(state$soffice, pdf, docx, timeout = timeouts[["libreoffice"]]),
+      word_com    = .convert_word_com(pdf, docx, timeout = timeouts[["word_com"]]),
       FALSE
     )
 
     # One documented fallback hop, not a silent cascade.
     if (!ok && identical(backend, "python") && !is.null(state$soffice)) {
       warning("pdf2docx failed on ", basename(pdf), "; retrying with LibreOffice.", call. = FALSE)
-      ok <- .convert_soffice(state$soffice, pdf, docx, timeout = timeout)
+      ok <- .convert_soffice(state$soffice, pdf, docx, timeout = timeouts[["libreoffice"]])
     }
 
     if (!ok) {
@@ -856,6 +860,31 @@ convert_pdfs_to_docx <- function(conversions,
   }
 
   cbind(conversions, converted = converted)
+}
+
+# Per-backend timeouts from `timeout`: one positive number for every backend,
+# or a vector named by backend (unnamed backends get 600 s).
+#' @noRd
+.backend_timeouts <- function(timeout) {
+  backends <- c("python", "libreoffice", "word_com")
+  msg <- paste0(
+    "'timeout' must be a single positive number of seconds, or positive numbers named by backend ",
+    "(", paste(paste0('"', backends, '"'), collapse = ", "), ")."
+  )
+  if (!is.numeric(timeout) || length(timeout) == 0L || anyNA(timeout) || any(timeout <= 0)) {
+    stop(msg, call. = FALSE)
+  }
+  nms <- names(timeout)
+  if (is.null(nms)) {
+    if (length(timeout) != 1L) stop(msg, call. = FALSE)
+    return(stats::setNames(rep(as.numeric(timeout), length(backends)), backends))
+  }
+  if (any(!nzchar(nms)) || anyDuplicated(nms) || !all(nms %in% backends)) {
+    stop(msg, call. = FALSE)
+  }
+  out <- stats::setNames(rep(600, length(backends)), backends)
+  out[nms] <- as.numeric(timeout)
+  out
 }
 
 #' Convert a Single PDF to DOCX Using the Best Available Backend
@@ -880,7 +909,7 @@ convert_pdf_to_docx <- function(src,
                                 dest = sub("\\.pdf$", ".docx", src, ignore.case = TRUE),
                                 backend = "auto",
                                 strict = TRUE,
-                                timeout = 600) {
+                                timeout = getOption("templecbe.docx_timeout", 600)) {
   if (!is.character(src) || length(src) != 1L || is.na(src) || !nzchar(trimws(src))) {
     stop("'src' must be a single non-empty file path.", call. = FALSE)
   }

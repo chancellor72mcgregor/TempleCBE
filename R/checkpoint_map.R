@@ -378,6 +378,12 @@ tune_grid_checkpointed <- function(object,
   shard <- validate_shard_spec(shard)
   object <- apply_workflow_cox_ties(object)
   dots <- list(...)
+  # The fingerprint keeps the `grid` argument as given, so checkpoints made
+  # before the grid was resolved up front (below) stay valid.
+  grid_arg <- grid
+  if (!is.null(checkpoint_dir)) {
+    grid <- resolve_checkpoint_grid(object, resamples, grid, dots[["param_info"]])
+  }
 
   # Built in an environment holding only its inputs (not this frame): an
   # unforced `...` promise would otherwise carry the caller's frame, such as
@@ -399,12 +405,12 @@ tune_grid_checkpointed <- function(object,
     return(fit_split(resamples))
   }
 
-  checkpointed_resamples(
+  res <- checkpointed_resamples(
     resamples = resamples,
     fit_split = fit_split,
     split_fingerprint = function(split) {
       compute_tidymodels_split_fingerprint(
-        object = object, split = split, grid = grid, metrics = metrics, control = control,
+        object = object, split = split, grid = grid_arg, metrics = metrics, control = control,
         eval_time = dots[["eval_time"]], extra = drop_named(dots, "eval_time")
       )
     },
@@ -418,6 +424,77 @@ tune_grid_checkpointed <- function(object,
     checkpoint_mismatch = checkpoint_mismatch,
     progress = progress
   )
+  warn_inconsistent_candidates(res, checkpoint_dir)
+  res
+}
+
+#' Resolve a Grid Size to One Grid for Every Resample
+#'
+#' [tune_grid_checkpointed()] runs `tune::tune_grid()` once per resample. With
+#' `grid` a number, each of those calls used to build its own space-filling
+#' design, and when \pkg{dials} has no pre-made design for the size and the
+#' number of parameters it draws a random one, so each resample (and each
+#' shard, on another machine) was tuned over different candidates and the
+#' combined `tune_results` mixed them. The grid is now built once, the way
+#' tune builds it (`tune::check_parameters()` then `tune::.check_grid()`,
+#' with `param_info` when given), under a seed derived from the workflow and
+#' the grid size, so every resample, shard and rerun gets the same candidates.
+#' Anything that cannot be resolved this way (a model specification, an older
+#' \pkg{tune}, a workflow with nothing to tune) is left to `tune_grid()`.
+#' @noRd
+resolve_checkpoint_grid <- function(object, resamples, grid, param_info = NULL) {
+  if (!is.numeric(grid) || length(grid) != 1L || is.na(grid) || !inherits(object, "workflow") ||
+      !inherits(resamples, "rset") || nrow(resamples) == 0L) {
+    return(grid)
+  }
+  tune_ns <- asNamespace("tune")
+  if (!exists("check_parameters", envir = tune_ns) || !exists(".check_grid", envir = tune_ns)) {
+    return(grid)
+  }
+  seed <- strtoi(substr(paste0(as.character(openssl::sha256(serialize(
+    list(object = object, grid = grid, param_info = param_info), NULL
+  ))), collapse = ""), 1L, 7L), base = 16L)
+  resolved <- tryCatch(
+    with_local_seed(seed, {
+      pset <- tune_ns$check_parameters(object, pset = param_info, data = resamples$splits[[1]]$data,
+                                       grid_names = character())
+      if (nrow(pset) == 0L) NULL else tune_ns$.check_grid(grid = grid, workflow = object, pset = pset)
+    }),
+    error = function(e) NULL
+  )
+  if (is.data.frame(resolved) && nrow(resolved) > 0L) resolved else grid
+}
+
+#' Warn When the Resamples of a Checkpointed Tuning Run Saw Different Candidates
+#'
+#' Checkpoints written before the grid was resolved up front (see
+#' resolve_checkpoint_grid()) can hold different candidate sets for different
+#' resamples. Their fingerprints still match, so they are reused; this says
+#' so, rather than letting the combined metrics average unlike candidates.
+#' @noRd
+warn_inconsistent_candidates <- function(res, checkpoint_dir) {
+  if (!inherits(res, "tune_results") || !".metrics" %in% names(res) || nrow(res) < 2L) {
+    return(invisible(FALSE))
+  }
+  keys <- lapply(res$.metrics, function(m) {
+    if (!is.data.frame(m) || nrow(m) == 0L) return(NULL)
+    params <- setdiff(names(m), c(".metric", ".estimator", ".estimate", ".config", ".eval_time", ".iter"))
+    if (length(params) == 0L) return(NULL)
+    u <- unique(as.data.frame(m[params]))
+    sort(do.call(paste, c(lapply(u, function(col) format(col, digits = 10)), sep = "|")))
+  })
+  keys <- Filter(Negate(is.null), keys)
+  if (length(keys) < 2L || all(vapply(keys, identical, logical(1), keys[[1]]))) {
+    return(invisible(FALSE))
+  }
+  warning(
+    "tune_grid_checkpointed(): the resamples were not all tuned over the same candidates (checkpoints in '",
+    checkpoint_dir, "' were probably made by an older TempleCBE, which built a random grid per resample ",
+    "when `grid` is a number). Delete those checkpoints, or use a new `checkpoint_dir`, to tune every ",
+    "resample over one grid.",
+    call. = FALSE
+  )
+  invisible(TRUE)
 }
 
 #' Checkpointed Model Evaluation Across Resamples (`fit_resamples_checkpointed`)
@@ -668,15 +745,59 @@ checkpointed_resamples <- function(resamples,
   combined
 }
 
+# The options workflowsets::option_add() stored for row `i` of a workflow set,
+# as a plain named list (empty when there are none).
+#' @noRd
+workflow_set_option <- function(object, i) {
+  opt <- tryCatch(object$option[[i]], error = function(e) NULL)
+  if (is.null(opt) || length(opt) == 0L) {
+    return(list())
+  }
+  opt <- unclass(opt)
+  if (is.null(names(opt)) || any(!nzchar(names(opt)))) {
+    return(list())
+  }
+  opt
+}
+
+# The arguments a workflow of a set is run with: its options, overridden by
+# the arguments given to the call (what workflowsets::workflow_map() does,
+# through option_add()). The merge is shallow, so a `control` object given to
+# the call replaces the workflow's whole `control` option instead of being
+# merged into it field by field. As in workflow_map() (its recheck_options()),
+# options that `fit_resamples()` has no use for (`param_info`, `grid`, ...) are
+# dropped; arguments given in the call are passed on as before.
+#' @noRd
+workflow_call_args <- function(dots, option, fn) {
+  if (identical(fn, "fit_resamples") && length(option) > 0L) {
+    option <- option[names(option) %in% c("resamples", "metrics", "control", "eval_time")]
+  }
+  args <- option
+  for (nm in names(dots)) {
+    args[nm] <- list(dots[[nm]])
+  }
+  # Arguments of the call first, as before, then the options they did not set.
+  c(args[names(args) %in% names(dots)], args[!names(args) %in% names(dots)])
+}
+
 #' Checkpointed Workflow Sets Mapping (`workflow_map_checkpointed`)
 #'
 #' A resumable, fingerprinted wrapper around [workflowsets::workflow_map()] that
 #' checkpoints each workflow's tuning results independently into subdirectories
 #' of `checkpoint_dir`.
 #'
+#' Each workflow is run with its own options, as set with
+#' [workflowsets::option_add()] (`param_info`, `grid`, ...), combined with the
+#' arguments given in `...` the way [workflowsets::workflow_map()] combines
+#' them: an argument given in `...` replaces an option of the same name. The
+#' options are part of each workflow's fingerprint, so changing one recomputes
+#' that workflow only. For `fn = "fit_resamples"` the tuning-only options
+#' (`param_info`, `grid`, ...) are dropped, as in `workflow_map()`.
+#'
 #' @param object A `workflow_set` object.
 #' @param fn Function to apply to each workflow (default `"tune_grid"`).
-#' @param ... Arguments passed to `fn`.
+#' @param ... Arguments passed to `fn`, for every workflow (they override the
+#'   workflow's own [workflowsets::option_add()] options of the same name).
 #' @param seed Optional integer seed (default `1L`) used to set a reproducible RNG seed per workflow.
 #' @param verbose Logical (default `FALSE`). Display progress from [workflowsets::workflow_map()].
 #' @param checkpoint_dir Directory to store per-workflow checkpoints. They are read back
@@ -705,7 +826,11 @@ workflow_map_checkpointed <- function(object,
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
 
   if (is.null(checkpoint_dir)) {
-    return(workflowsets::workflow_map(object = object, fn = fn, ...))
+    # `seed` and `verbose` are this function's own arguments, so they never
+    # reach `...`: forward them, or workflow_map() draws a random seed.
+    wm_args <- list(object = object, fn = fn, verbose = verbose)
+    if (!is.null(seed)) wm_args$seed <- seed
+    return(do.call(workflowsets::workflow_map, c(wm_args, list(...))))
   }
 
   if (!inherits(object, "workflow_set")) {
@@ -729,9 +854,19 @@ workflow_map_checkpointed <- function(object,
     dots$verbose <- NULL
   }
 
-  # One fingerprint per workflow: the workflow spec, the function and its
-  # arguments (including the resamples), and the seed. The run fingerprint
-  # combines them all.
+  # The arguments each workflow is run with: its own options (set with
+  # workflowsets::option_add(), such as `param_info` or `grid`) under the
+  # arguments of this call, as workflowsets::workflow_map() combines them.
+  # They used to be ignored here, so a per-workflow `param_info` or `grid`
+  # was silently dropped and left out of the fingerprint.
+  wflow_args <- lapply(seq_len(n_wflow), function(i) {
+    workflow_call_args(dots, workflow_set_option(object, i), fn)
+  })
+
+  # One fingerprint per workflow: the workflow spec, the function and the
+  # arguments it is run with (including the resamples and the workflow's
+  # options), and the seed. The run fingerprint combines them all. A workflow
+  # without options is fingerprinted exactly as before.
   ckpt_schema <- checkpoint_schema_version()
   wflow_fp <- function(i) {
     payload <- list(
@@ -740,7 +875,7 @@ workflow_map_checkpointed <- function(object,
       fn = fn,
       wflow_id = wflow_ids[i],
       workflow = tryCatch(object$info[[i]]$workflow[[1]], error = function(e) NULL),
-      dots = dots,
+      dots = wflow_args[[i]],
       seed = seed
     )
     paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
@@ -773,16 +908,17 @@ workflow_map_checkpointed <- function(object,
       next
     }
 
+    w_args <- wflow_args[[i]]
     eval_expr <- function() {
       if (identical(fn, "tune_grid")) {
         do.call(tune_grid_checkpointed, c(
           list(object = w_spec, checkpoint_dir = w_dir, checkpoint_mismatch = checkpoint_mismatch, progress = progress),
-          dots
+          w_args
         ))
       } else if (identical(fn, "fit_resamples")) {
         do.call(fit_resamples_checkpointed, c(
           list(object = w_spec, checkpoint_dir = w_dir, checkpoint_mismatch = checkpoint_mismatch, progress = progress),
-          dots
+          w_args
         ))
       } else {
         ckpt_file <- file.path(w_dir, "workflow_result.rds")
@@ -794,10 +930,9 @@ workflow_map_checkpointed <- function(object,
         }
         # Written once, below, and only when it did not fail.
         if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
-        out_w <- do.call(workflowsets::workflow_map, c(
-          list(object = object[i, , drop = FALSE], fn = fn, seed = seed, verbose = verbose),
-          dots
-        ))
+        wm_args <- list(object = object[i, , drop = FALSE], fn = fn, verbose = verbose)
+        if (!is.null(seed)) wm_args$seed <- seed
+        out_w <- do.call(workflowsets::workflow_map, c(wm_args, dots))
         out_w$result[[1]]
       }
     }
@@ -829,7 +964,8 @@ workflow_map_checkpointed <- function(object,
     }
     # Drop this iteration's references before the next workflow, so nothing
     # from it can be reached from the next workflow's worker closures.
-    rm(res_i, eval_expr, w_spec)
+    rm(res_i, eval_expr, w_spec, w_args)
+    wflow_args[i] <- list(NULL)
   }
 
   res_set <- object

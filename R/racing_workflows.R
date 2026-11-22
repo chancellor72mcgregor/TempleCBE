@@ -89,7 +89,13 @@ control_race_survival <- function(save_pred = TRUE,
 #'   workflow); pass \code{eval_time} for any other preprocessor.
 #' @param control A \code{\link[finetune]{control_race}} object. Defaults to \code{\link{control_race_survival}()}.
 #' @param seed Optional random seed integer for reproducible candidate generation and fold processing.
-#' @param checkpoint_dir Optional directory path where per-task checkpoints are stored.
+#' @param checkpoint_dir Optional directory path where per-task checkpoints are stored. For a
+#'   \code{workflow_set}, each workflow's race is checkpointed separately with
+#'   \code{\link{workflow_map_checkpointed}}.
+#' @details For a \code{workflow_set}, a workflow's own \code{\link[workflowsets]{option_add}}
+#'   options (\code{grid}, \code{param_info}, \code{eval_time}, ...) are kept: \code{grid},
+#'   \code{metrics}, \code{eval_time} and \code{control} replace them only when given in the
+#'   call, and otherwise their defaults are used only for workflows without that option.
 #' @param shard Optional shard specification (e.g. \code{c(1, 2)}) for distributed computation.
 #' @param checkpoint_mismatch Action on mismatch: \code{"recompute"}, \code{"overwrite"}, or \code{"error"}.
 #' @param ... Additional arguments passed to \code{\link[finetune]{tune_race_anova}},
@@ -134,6 +140,13 @@ tune_race_survival <- function(object,
                                ...) {
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
   shard <- validate_shard_spec(shard)
+  # Which race settings the caller gave: for a workflow set, only those
+  # override the workflows' own option_add() options; a default fills in only
+  # where a workflow has no option of that name.
+  race_given <- c(
+    grid = !missing(grid), metrics = !is.null(metrics),
+    eval_time = !is.null(eval_time), control = !is.null(control)
+  )
   object <- apply_workflow_cox_ties(object)
   rlang::check_installed(c("finetune", "tune", "yardstick"), reason = "for tune_race_survival().")
   fn <- match.arg(fn)
@@ -180,18 +193,32 @@ tune_race_survival <- function(object,
 
   if (inherits(object, "workflow_set")) {
     rlang::check_installed("workflowsets", reason = "for racing across a workflow_set.")
-    res <- workflowsets::workflow_map(
-      object,
-      fn = call_fn,
-      seed = seed,
-      resamples = resamples,
-      grid = grid,
-      metrics = metrics,
-      eval_time = eval_time,
-      control = control,
-      ...
-    )
-    return(res)
+    race_args <- list(grid = grid, metrics = metrics, eval_time = eval_time, control = control)
+    # The defaults (grid = 20, the default metrics, evaluation times and
+    # control) used to be passed to workflow_map() like any argument, which
+    # overwrote every workflow's own option_add(grid = ...) and the like.
+    # Now a default is added as an option only to the workflows without one.
+    defaults <- race_args[!race_given[names(race_args)]]
+    for (i in seq_len(nrow(object))) {
+      have <- names(workflow_set_option(object, i))
+      add <- defaults[setdiff(names(defaults), have)]
+      if (length(add) > 0L) {
+        object <- do.call(workflowsets::option_add, c(list(object), add, list(id = object$wflow_id[i])))
+      }
+    }
+    given <- c(list(resamples = resamples), race_args[race_given[names(race_args)]])
+    if (!is.null(checkpoint_dir)) {
+      # A workflow set is checkpointed one workflow at a time (it used to
+      # ignore `checkpoint_dir` altogether).
+      return(do.call(workflow_map_checkpointed, c(
+        list(object = object, fn = call_fn, seed = seed, checkpoint_dir = checkpoint_dir,
+             shard = shard, checkpoint_mismatch = checkpoint_mismatch),
+        given, list(...)
+      )))
+    }
+    wm_args <- list(object = object, fn = call_fn)
+    if (!is.null(seed)) wm_args$seed <- seed
+    return(do.call(workflowsets::workflow_map, c(wm_args, given, list(...))))
   }
 
   if (!inherits(object, "workflow")) {

@@ -97,6 +97,12 @@ NULL
 #'   subject to `min_prop`).
 #' @param alpha Significance levels for the `first_p<alpha` criteria (default `c(0.1, 0.05, 0.001)`;
 #'   `NULL` for none).
+#' @param pmethod How `maxstat::maxstat.test()` computes the p-value of the maximally selected
+#'   statistic: `"none"` (default; no p-value, as in `survminer::surv_cutpoint()`), or one of
+#'   `"condMC"` (conditional Monte Carlo, with `B` permutations), `"Lau92"`, `"Lau94"`,
+#'   `"exactGauss"`, `"HL"` and `"min"`. Unlike the p-values of the other criteria, these correct
+#'   for having searched over the cutpoints. Needs \pkg{maxstat}.
+#' @param B Number of Monte Carlo replications for `pmethod = "condMC"` (default 10000).
 #' @return A list with class `"cbe_km_cutpoint"` containing:
 #'   \item{optimal_cutpoint}{Numeric value of the optimal cutpoint threshold}
 #'   \item{optimal_p}{P-value at the optimal cutpoint}
@@ -105,6 +111,10 @@ NULL
 #'   \item{criteria}{A tibble with one row per selection criterion (see Selection criteria): `criterion`,
 #'     the columns of `candidates`, and `neg_log10_p`}
 #'   \item{cox_coef}{Coefficient of the continuous variable in a univariable Cox model}
+#'   \item{maxstat}{`NULL` without \pkg{maxstat}; otherwise a list with the maximally selected
+#'     log-rank `cutpoint`, its standardized `statistic`, the search-adjusted `p_value` (`NA` when
+#'     `pmethod = "none"`) and `pmethod`. With a `pmethod`, the `maxstat` row of `criteria` also
+#'     carries this adjusted p-value in `adjusted_p_value`.}
 #'   \item{data}{The input data frame augmented with a \code{<var_col>_strata} binary factor column}
 #'   \item{time_col}{Name of time column}
 #'   \item{status_col}{Name of status column}
@@ -131,9 +141,18 @@ km_cutpoint_search <- function(data,
                                min_prop = 0.10,
                                n_cuts = 50,
                                cutpoints = c("quantiles", "midpoints"),
-                               alpha = c(0.1, 0.05, 0.001)) {
+                               alpha = c(0.1, 0.05, 0.001),
+                               pmethod = c("none", "condMC", "Lau92", "Lau94", "exactGauss", "HL", "min"),
+                               B = 10000) {
   cutpoints <- match.arg(cutpoints)
+  pmethod <- match.arg(pmethod)
   alpha <- .check_cutpoint_alpha(alpha)
+  if (!is.numeric(B) || length(B) != 1L || is.na(B) || B < 1 || B != round(B)) {
+    stop("`B` must be a single whole number of at least 1.", call. = FALSE)
+  }
+  if (pmethod != "none" && !requireNamespace("maxstat", quietly = TRUE)) {
+    stop("Package \"maxstat\" is required for `pmethod = \"", pmethod, "\"`.", call. = FALSE)
+  }
   if (!requireNamespace("survival", quietly = TRUE)) {
     stop("Package \"survival\" is required for km_cutpoint_search().", call. = FALSE)
   }
@@ -207,13 +226,10 @@ km_cutpoint_search <- function(data,
   sv <- survival::Surv(df[[time_col]], df[[status_col]])
   cox_coef <- .cutpoint_cox_coef(sv, vals)
   maxstat_cut <- NULL
+  maxstat_res <- NULL
   if (requireNamespace("maxstat", quietly = TRUE)) {
-    md <- data.frame(.t = df[[time_col]], .s = df[[status_col]], .x = vals)
-    maxstat_cut <- tryCatch(
-      unname(maxstat::maxstat.test(survival::Surv(.t, .s) ~ .x, data = md, smethod = "LogRank", pmethod = "none",
-                                   minprop = min_prop, maxprop = 1 - min_prop)$estimate),
-      error = function(e) NULL
-    )
+    maxstat_res <- .maxstat_cutpoint(df[[time_col]], df[[status_col]], vals, min_prop, pmethod, B)
+    maxstat_cut <- maxstat_res$cutpoint
   }
 
   # Augment data with strata
@@ -228,8 +244,11 @@ km_cutpoint_search <- function(data,
     optimal_p = results$p_value[best_idx],
     optimal_hr = results$hr[best_idx],
     candidates = results,
-    criteria = .cutpoint_criteria(results, vals, cox_coef, alpha, eval_cut, maxstat_cut),
+    criteria = .add_maxstat_adjusted_p(
+      .cutpoint_criteria(results, vals, cox_coef, alpha, eval_cut, maxstat_cut), maxstat_res
+    ),
     cox_coef = cox_coef,
+    maxstat = maxstat_res,
     data = data,
     time_col = time_col,
     status_col = status_col,
@@ -237,6 +256,115 @@ km_cutpoint_search <- function(data,
   )
   class(out) <- c("cbe_km_cutpoint", "list")
   out
+}
+
+# maxstat::maxstat.test() with the log-rank statistic: the cutpoint, the
+# standardized statistic and, unless pmethod = "none", the p-value adjusted for
+# the search. NULL when maxstat fails (a degenerate variable, say).
+.maxstat_cutpoint <- function(time, status, x, min_prop, pmethod = "none", B = 10000) {
+  md <- data.frame(.t = time, .s = status, .x = x)
+  args <- list(
+    survival::Surv(.t, .s) ~ .x, data = md, smethod = "LogRank", pmethod = pmethod,
+    minprop = min_prop, maxprop = 1 - min_prop
+  )
+  if (identical(pmethod, "condMC")) args$B <- B
+  ms <- tryCatch(do.call(maxstat::maxstat.test, args), error = function(e) {
+    if (!identical(pmethod, "none")) {
+      warning("maxstat::maxstat.test() failed (", conditionMessage(e), "); there is no maxstat criterion.",
+              call. = FALSE)
+    }
+    NULL
+  })
+  if (is.null(ms)) return(NULL)
+  list(
+    cutpoint = unname(ms$estimate),
+    statistic = unname(ms$statistic),
+    p_value = if (identical(pmethod, "none")) NA_real_ else unname(as.numeric(ms$p.value)),
+    pmethod = pmethod
+  )
+}
+
+.add_maxstat_adjusted_p <- function(criteria, maxstat_res) {
+  if (is.null(maxstat_res) || identical(maxstat_res$pmethod, "none")) return(criteria)
+  criteria$adjusted_p_value <- ifelse(criteria$criterion == "maxstat", maxstat_res$p_value, NA_real_)
+  criteria
+}
+
+#' Survival Cutpoints With a Search-Adjusted P-Value (`surv_cutpoint_condmc`)
+#'
+#' The maximally selected log-rank cutpoint of each variable, as
+#' `survminer::surv_cutpoint()` finds it, with the p-value that
+#' `survminer` does not report: `maxstat::maxstat.test()` with
+#' `pmethod = "condMC"` (by default), which corrects for having searched over
+#' every cutpoint. (`survminer` fixes `pmethod = "none"`.) For the full set of
+#' selection rules and plots of one variable, see [km_cutpoint_search()].
+#'
+#' @param data A data frame.
+#' @param time,event Names of the follow-up time and event status (1 = event,
+#'   0 = censored) columns.
+#' @param variables Names of the continuous variables to cut.
+#' @param minprop Minimum proportion of subjects in each group (default 0.1).
+#' @param pmethod P-value method of `maxstat::maxstat.test()` (default
+#'   `"condMC"`); `"none"` gives no p-value.
+#' @param B Number of Monte Carlo replications for `"condMC"` (default 10000).
+#' @param seed Optional seed for the Monte Carlo p-values, set locally (the
+#'   session's random number stream is left as it was).
+#' @return A tibble with one row per variable: `variable`, `cutpoint`,
+#'   `statistic` (the standardized log-rank statistic), `p_value`,
+#'   `pmethod`, `n_low` and `n_high` (subjects at or below, and above, the
+#'   cutpoint).
+#' @seealso [km_cutpoint_search()]
+#' @export
+#' @examples
+#' if (requireNamespace("maxstat", quietly = TRUE)) {
+#'   lung <- stats::na.omit(survival::lung[, c("time", "status", "age", "meal.cal")])
+#'   lung$status <- lung$status - 1
+#'   surv_cutpoint_condmc(lung, "time", "status", c("age", "meal.cal"), B = 2000, seed = 1)
+#' }
+surv_cutpoint_condmc <- function(data,
+                                 time,
+                                 event,
+                                 variables,
+                                 minprop = 0.1,
+                                 pmethod = c("condMC", "none", "Lau92", "Lau94", "exactGauss", "HL", "min"),
+                                 B = 10000,
+                                 seed = NULL) {
+  pmethod <- match.arg(pmethod)
+  rlang::check_installed("maxstat", reason = "for surv_cutpoint_condmc().")
+  if (!is.data.frame(data) || nrow(data) == 0L) {
+    stop("`data` must be a non-empty data frame.", call. = FALSE)
+  }
+  if (!is.character(variables) || length(variables) == 0L) {
+    stop("`variables` must name at least one column.", call. = FALSE)
+  }
+  missing_cols <- setdiff(c(time, event, variables), names(data))
+  if (length(missing_cols) > 0L) {
+    stop("Column(s) not found in `data`: ", paste(missing_cols, collapse = ", "), call. = FALSE)
+  }
+  if (!is.numeric(minprop) || length(minprop) != 1L || is.na(minprop) || minprop <= 0 || minprop >= 0.5) {
+    stop("`minprop` must be a single number in (0, 0.5).", call. = FALSE)
+  }
+  if (!is.numeric(B) || length(B) != 1L || is.na(B) || B < 1 || B != round(B)) {
+    stop("`B` must be a single whole number of at least 1.", call. = FALSE)
+  }
+  one <- function(v) {
+    keep <- !is.na(data[[time]]) & !is.na(data[[event]]) & !is.na(data[[v]])
+    x <- data[[v]][keep]
+    if (!is.numeric(x)) {
+      stop("Variable '", v, "' is not numeric.", call. = FALSE)
+    }
+    res <- .maxstat_cutpoint(data[[time]][keep], data[[event]][keep], x, minprop, pmethod, B)
+    if (is.null(res)) {
+      return(tibble::tibble(variable = v, cutpoint = NA_real_, statistic = NA_real_, p_value = NA_real_,
+                            pmethod = pmethod, n_low = NA_integer_, n_high = NA_integer_))
+    }
+    tibble::tibble(
+      variable = v, cutpoint = res$cutpoint, statistic = res$statistic, p_value = res$p_value,
+      pmethod = pmethod, n_low = sum(x <= res$cutpoint), n_high = sum(x > res$cutpoint)
+    )
+  }
+  run <- function() dplyr::bind_rows(lapply(variables, one))
+  if (is.null(seed)) run() else with_local_seed(seed, run())
 }
 
 #' Plot Cutpoint Search Profile
