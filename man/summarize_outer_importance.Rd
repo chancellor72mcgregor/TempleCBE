@@ -13,7 +13,8 @@ summarize_outer_importance(
 }
 \arguments{
 \item{x}{A tibble returned by [tidy_outer_coefficients()] (with `term` and
-`estimate` columns) or [score_outer()] (with a `coefficients` list column).}
+`estimate` columns), [score_outer()] (with a `coefficients` list column),
+or a [nested_cv_coxnet()] result (with a `.coefs` list column).}
 
 \item{nonzero_only}{Logical (default `FALSE`). When `TRUE`, `median_estimate`,
 `min_estimate`, `max_estimate`, and quantiles are computed over non-zero

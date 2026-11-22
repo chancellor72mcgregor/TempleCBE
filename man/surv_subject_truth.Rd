@@ -19,8 +19,15 @@ their last interval; `"first"` keeps each subject's time to first event.}
 }
 \value{
 A tibble with one row per subject, sorted by `subject_id`:
-  `.subject_id`, `.entry` (start of the first interval; 0 for right-censored
-  data), and `.truth`, a right-censored `Surv` object.
+  * `.subject_id`: the subject identifier, with the type and values of
+    `subject_id` (the row number, `1:n`, for right-censored data without
+    `subject_id`). Use it to join the truth back to subject-level
+    predictions or covariates; [collapse_start_stop_predictions()] and the
+    `.predictions` of [tune_grid_start_stop()] carry the same column.
+  * `.entry`: the start of the subject's first interval (0 for
+    right-censored data).
+  * `.truth`: a right-censored `Surv` object: the stop of the last kept
+    interval and its event status.
 }
 \description{
 Turns right-censored or counting-process (start/stop) survival outcomes into

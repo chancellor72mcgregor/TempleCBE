@@ -10,7 +10,9 @@ tidy_outer_coefficients(x)
 unnest_outer_coefficients(x)
 }
 \arguments{
-\item{x}{A tibble returned by [score_outer()].}
+\item{x}{A tibble returned by [score_outer()], or a [nested_cv_coxnet()]
+result (its `id`, `mixture`, `penalty` and `.coefs` become `outer_fold`,
+`alpha`, `lambda` and `coefficients`, with `model = "coxnet"`).}
 }
 \value{
 A long tibble containing `outer_fold` (if present), `model`, `alpha`,
@@ -22,5 +24,6 @@ tibble with one row per term per model and fold. Suitable for plotting variable
 importance, coefficient paths, and term stability across outer folds.
 }
 \seealso{
-[score_outer()], [summarize_outer_importance()], [plot_outer_importance()]
+[score_outer()], [summarize_outer_importance()], [plot_outer_importance()],
+  [tidy_nested_cv_coxnet()]
 }

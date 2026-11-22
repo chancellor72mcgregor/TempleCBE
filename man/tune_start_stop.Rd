@@ -107,10 +107,14 @@ with the `"survival"` (coxph) or `"glmnet"` engine (from \pkg{censored});
 both fit start/stop data, and scoring uses their linear predictor. Other
 censored-regression models either refuse start/stop outcomes or treat each
 row as a subject. With the glmnet engine, candidates that differ only in
-`penalty` share one fit per resample, as glmnet fits the whole path.
+`penalty` share one fit per resample, as glmnet fits the whole path. Its
+`cox.ties` is set to `getOption("templecbe.cox_ties", "breslow")` unless
+the engine sets it, e.g. `set_engine("glmnet", cox.ties = "efron")`, which
+also silences glmnet 5.1's warning about the default tie handling.
 
 **Resamples.** Group them by subject, e.g. [rsample::group_vfold_cv()] with
-`group = subject_id`. If a subject is in both the analysis and the
+`group = subject_id`, or [subject_vfold_cv()], which also stratifies the
+folds by each subject's event status. If a subject is in both the analysis and the
 assessment set of a resample, these functions stop before fitting
 (`check_subject_overlap = FALSE` skips the check). Out-of-bag sets of
 [rsample::group_bootstraps()] pass.

@@ -893,6 +893,41 @@ surv_metric_frame <- function(truth, surv, eval_time, weights, penalty) {
 }
 
 compute_surv_metrics <- function(frame, metrics, info) {
+  # A penalty whose predictions are not finite (glmnet can return NaN
+  # survival at an extreme penalty on a small fold) is scored NA instead of
+  # stopping yardstick, and so the whole resample, with "No (non-missing)
+  # observations". Selection and racing skip NA estimates.
+  pens <- unique(frame$penalty)
+  bad_pen <- pens[vapply(pens, function(pen) {
+    rows <- frame$penalty == pen
+    !all(is.finite(frame$.pred_time[rows])) ||
+      !all(vapply(frame$.pred[rows], function(p) all(is.finite(p$.pred_survival)), logical(1)))
+  }, logical(1))]
+  bad_rows <- frame$penalty %in% bad_pen
+  scored <- if (any(!bad_rows)) score_surv_metrics(frame[!bad_rows, , drop = FALSE], metrics, info) else NULL
+  if (!length(bad_pen)) {
+    return(scored)
+  }
+  eval_time <- frame$.pred[[which(bad_rows)[1]]]$.eval_time
+  na_rows <- purrr::list_rbind(lapply(bad_pen, function(pen) {
+    na_surv_metric_rows(pen, info, eval_time)
+  }))
+  out <- dplyr::bind_rows(scored, na_rows)
+  out[order(match(out$penalty, pens)), , drop = FALSE]
+}
+
+# One NA row per metric (per evaluation time for time-dependent metrics).
+na_surv_metric_rows <- function(penalty, info, eval_time) {
+  purrr::list_rbind(lapply(seq_len(nrow(info)), function(j) {
+    times <- if (info$class[j] == "dynamic_survival_metric") eval_time else NA_real_
+    tibble::tibble(
+      penalty = penalty, .metric = info$metric[j], .estimator = "standard",
+      .eval_time = times, .estimate = NA_real_
+    )
+  }))
+}
+
+score_surv_metrics <- function(frame, metrics, info) {
   grouped <- dplyr::group_by(frame, .data$penalty)
   args <- list(grouped, truth = ".truth")
   if (any(info$class %in% c("dynamic_survival_metric", "integrated_survival_metric"))) {

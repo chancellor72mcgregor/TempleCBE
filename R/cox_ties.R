@@ -84,16 +84,16 @@ apply_spec_cox_ties <- function(spec, tie_val) {
   engine <- spec$engine
   mode <- spec$mode
 
-  is_cox <- identical(mode, "censored regression") ||
-    engine %in% c("glmnet", "coxnet") ||
-    inherits(spec, "proportional_hazards")
+  # `cox.ties` is a glmnet argument: coxph() (the "survival" engine) and
+  # other censored-regression engines reject it, so only glmnet Cox models
+  # get it.
+  is_cox <- engine %in% c("glmnet", "coxnet") &&
+    (identical(mode, "censored regression") || inherits(spec, "proportional_hazards"))
 
-  if (is_cox) {
-    cur_args <- spec$engine_args
-    if (is.null(cur_args) || !"cox.ties" %in% names(cur_args)) {
-      new_args <- c(cur_args, list(cox.ties = tie_val))
-      spec$engine_args <- new_args
-    }
+  # parsnip keeps engine arguments, as quosures, in `eng_args` (an
+  # `engine_args` field is ignored when the model is fit).
+  if (is_cox && !"cox.ties" %in% names(spec$eng_args)) {
+    spec$eng_args <- c(spec$eng_args, rlang::quos(cox.ties = !!tie_val))
   }
   spec
 }

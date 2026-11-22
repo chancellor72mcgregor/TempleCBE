@@ -102,9 +102,18 @@
 #'   `id`, the chosen `mixture` and `penalty`, `.metrics` (outer assessment-set
 #'   metrics), `.coefs` (coefficients of the refit), and `.inner` (the inner
 #'   cross-validation's summarized metrics). If `importance = "loco_mp"`, includes
-#'   `.importance` with tidy LOCO-MP statistical inference. `tune::collect_metrics()`
-#'   averages `.metrics` over outer splits.
-#' @seealso [cv_coxnet()], [coxnet()], [loco_mp_coxnet()], [tune_race_survival()]
+#'   `.importance` with tidy LOCO-MP statistical inference. When
+#'   `tune_method` races, includes `.race`: a one-row tibble per outer split
+#'   with `n_candidates`, `n_eliminated`, `n_survivors`, `n_resamples` (inner
+#'   resamples) and `candidates` (one row per candidate with `n_resamples`, the
+#'   inner resamples it was scored on, and `eliminated`). `tune::collect_metrics()`
+#'   averages `.metrics` over outer splits; [tidy_nested_cv_coxnet()] and
+#'   [summarize_loco_mp()] unnest and summarize `.coefs` and `.importance`,
+#'   and [tidy_outer_coefficients()], [summarize_outer_importance()] and
+#'   [plot_outer_importance()] accept the result directly. [subject_nested_cv()]
+#'   builds `object` with grouped folds stratified by subject event status.
+#' @seealso [cv_coxnet()], [coxnet()], [loco_mp_coxnet()], [tune_race_survival()],
+#'   [subject_nested_cv()]
 #' @export
 #' @examples
 #' \donttest{
@@ -279,6 +288,7 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         ...
       )
       inner_metrics <- tune::collect_metrics(race_res)
+      race_col <- race_summary_finetune(race_res, nrow(object$inner_resamples[[i]]))
     } else {
       inner <- cv_coxnet_impl(
         spec, data = analysis, mixture = mixture, penalty = penalty,
@@ -291,6 +301,7 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
       chosen <- if (rule == "min") inner$lambda_min else inner$lambda_1se
       refit <- inner$fit
       inner_metrics <- inner$metrics
+      race_col <- if (native_race) race_summary(inner$race, nrow(object$inner_resamples[[i]])) else NULL
     }
 
     test <- spec$new_frame(assessment, refit$blueprint)
@@ -354,6 +365,9 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
     )
     if (importance == "loco_mp") {
       res_row$.importance <- loco_col
+    }
+    if (tune_method != "grid") {
+      res_row$.race <- list(race_col)
     }
     res_row
   })
@@ -438,6 +452,31 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
   class(out) <- c("nested_cv_coxnet", class(out))
   out
   })
+}
+
+# One-row summary of an inner race: how many candidates entered, how many
+# were eliminated, and the per-candidate detail (`candidates`: mixture,
+# penalty, n_resamples, eliminated).
+race_summary <- function(candidates, n_resamples) {
+  if (is.null(candidates) || !nrow(candidates)) return(NULL)
+  tibble::tibble(
+    n_candidates = nrow(candidates),
+    n_eliminated = sum(candidates$eliminated),
+    n_survivors = sum(!candidates$eliminated),
+    n_resamples = as.integer(n_resamples),
+    candidates = list(candidates)
+  )
+}
+
+race_summary_finetune <- function(race_res, n_resamples) {
+  m <- tryCatch(tune::collect_metrics(race_res), error = function(e) NULL)
+  if (is.null(m) || !nrow(m)) return(NULL)
+  params <- intersect(c("mixture", "penalty"), names(m))
+  per <- dplyr::distinct(m[, c(params, ".config", "n"), drop = FALSE], .data$.config, .keep_all = TRUE)
+  names(per)[names(per) == "n"] <- "n_resamples"
+  per$n_resamples <- as.integer(per$n_resamples)
+  per$eliminated <- per$n_resamples < max(per$n_resamples)
+  race_summary(tibble::as_tibble(per), n_resamples)
 }
 
 # A `control` for tune_race_survival(): NULL keeps its default; a plain list

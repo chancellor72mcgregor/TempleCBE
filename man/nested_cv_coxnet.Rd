@@ -122,8 +122,16 @@ A tibble, of class `nested_cv_coxnet`, with one row per outer split:
   `id`, the chosen `mixture` and `penalty`, `.metrics` (outer assessment-set
   metrics), `.coefs` (coefficients of the refit), and `.inner` (the inner
   cross-validation's summarized metrics). If `importance = "loco_mp"`, includes
-  `.importance` with tidy LOCO-MP statistical inference. `tune::collect_metrics()`
-  averages `.metrics` over outer splits.
+  `.importance` with tidy LOCO-MP statistical inference. When
+  `tune_method` races, includes `.race`: a one-row tibble per outer split
+  with `n_candidates`, `n_eliminated`, `n_survivors`, `n_resamples` (inner
+  resamples) and `candidates` (one row per candidate with `n_resamples`, the
+  inner resamples it was scored on, and `eliminated`). `tune::collect_metrics()`
+  averages `.metrics` over outer splits; [tidy_nested_cv_coxnet()] and
+  [summarize_loco_mp()] unnest and summarize `.coefs` and `.importance`,
+  and [tidy_outer_coefficients()], [summarize_outer_importance()] and
+  [plot_outer_importance()] accept the result directly. [subject_nested_cv()]
+  builds `object` with grouped folds stratified by subject event status.
 }
 \description{
 Estimates how well the whole tuning procedure of [cv_coxnet()] generalizes.
@@ -221,5 +229,6 @@ if (requireNamespace("glmnet", quietly = TRUE) &&
 }
 }
 \seealso{
-[cv_coxnet()], [coxnet()], [loco_mp_coxnet()], [tune_race_survival()]
+[cv_coxnet()], [coxnet()], [loco_mp_coxnet()], [tune_race_survival()],
+  [subject_nested_cv()]
 }
