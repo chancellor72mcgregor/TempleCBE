@@ -59,6 +59,23 @@
 #' first `eval_time`). `lambda.1se` is the largest penalty, at the same
 #' mixture, whose mean is within one standard error of that best mean.
 #'
+#' **Racing.** With `tune_method = "race_anova"`, the candidates (every
+#' `mixture` and penalty) are raced over the resamples the way
+#' [finetune::tune_race_anova()] races a tuning grid, but on glmnet directly,
+#' so it works for start/stop data and in gap mode, which finetune cannot
+#' score. The first `burn_in` resamples score every candidate. Before each
+#' later resample, the selection `metric` is modelled as
+#' `.estimate ~ candidate + resample` and a candidate is dropped when the
+#' `1 - alpha` confidence interval of its difference from the current best is
+#' entirely on the worse side; the next resamples score only the survivors, and
+#' a mixture with no surviving penalty is no longer fit. Settings are chosen
+#' among the survivors, so `lambda.1se` is the largest surviving penalty within
+#' one standard error. `metrics` and `fold_metrics` keep the eliminated
+#' candidates, with their smaller `n`; `race` lists every candidate with the
+#' number of resamples it was scored on and whether it was eliminated. Racing
+#' runs the resamples after the burn-in one at a time and cannot be
+#' checkpointed.
+#'
 #' @param x A data frame or matrix of predictors, or a [recipes::recipe()]
 #'   whose outcome is a single `Surv` column.
 #' @param y For the data frame and matrix methods, a [survival::Surv()]
@@ -112,6 +129,13 @@
 #'   evaluates shard `i` of `n` resample folds.
 #' @param checkpoint_mismatch Action when a checkpoint fingerprint mismatches:
 #'   `"recompute"` (default), `"overwrite"`, or `"error"`.
+#' @param tune_method `"grid"` (default) scores every candidate on every
+#'   resample; `"race_anova"` races them; see Details.
+#' @param control Racing settings, used when `tune_method = "race_anova"`: a
+#'   list or a [finetune::control_race()] object, of which `burn_in` (default
+#'   `3`, at most the number of resamples minus one), `alpha` (default `0.05`)
+#'   and `randomize` (default `TRUE`, shuffle the order of the resamples) are
+#'   used.
 #' @param seed Optional integer seed for reproducible fold generation when
 #'   `resamples` is `NULL`. When `checkpoint_dir` is supplied and `resamples` is
 #'   `NULL`, defaults to `1L` to ensure cross-validation fold partitions are
@@ -130,7 +154,9 @@
 #'   * `fit`: a [coxnet()] model fit to all of `data` at the chosen `mixture`,
 #'     with `lambda_min` as its default penalty;
 #'   * `eval_time`, `resamples`, `covariates`, and `recurrent` (how recurrent
-#'     data were scored: `"error"`, `"first"`, or `"gap"`).
+#'     data were scored: `"error"`, `"first"`, or `"gap"`);
+#'   * `tune_method`, and `race`: with racing, one row per candidate
+#'     (`mixture`, `penalty`, `n_resamples`, `eliminated`), else `NULL`.
 #'
 #'   Use `predict()`, `tidy()`, `autoplot()`, and `tune::collect_metrics()` on
 #'   it.
@@ -185,7 +211,7 @@ cv_coxnet.data.frame <- function(x, y, subject_id = NULL, group = NULL, mixture 
                                  check_subject_overlap = TRUE,
                                  checkpoint_dir = NULL, shard = NULL,
                                  checkpoint_mismatch = c("recompute", "overwrite", "error"),
-                                 seed = NULL,
+                                 seed = NULL, tune_method = c("grid", "race_anova"), control = NULL,
                                  on_complete = getOption("templecbe.on_complete", NULL), ...) {
   run_with_on_complete("cv_coxnet", on_complete, meta = list(v = v, mixture = mixture), expr = {
     cv_coxnet_impl(
@@ -195,7 +221,8 @@ cv_coxnet.data.frame <- function(x, y, subject_id = NULL, group = NULL, mixture 
       recurrent = recurrent,
       parallel = parallel, parallel_over = parallel_over,
       check_subject_overlap = check_subject_overlap,
-      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed, ...
+      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed,
+      tune_method = tune_method, control = control, ...
     )
   })
 }
@@ -210,7 +237,7 @@ cv_coxnet.matrix <- function(x, y, subject_id = NULL, group = NULL, mixture = 1,
                              check_subject_overlap = TRUE,
                              checkpoint_dir = NULL, shard = NULL,
                              checkpoint_mismatch = c("recompute", "overwrite", "error"),
-                             seed = NULL,
+                             seed = NULL, tune_method = c("grid", "race_anova"), control = NULL,
                              on_complete = getOption("templecbe.on_complete", NULL), ...) {
   run_with_on_complete("cv_coxnet", on_complete, meta = list(v = v, mixture = mixture), expr = {
     cv_coxnet_impl(
@@ -220,7 +247,8 @@ cv_coxnet.matrix <- function(x, y, subject_id = NULL, group = NULL, mixture = 1,
       recurrent = recurrent,
       parallel = parallel, parallel_over = parallel_over,
       check_subject_overlap = check_subject_overlap,
-      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed, ...
+      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed,
+      tune_method = tune_method, control = control, ...
     )
   })
 }
@@ -235,7 +263,7 @@ cv_coxnet.formula <- function(formula, data, subject_id = NULL, group = NULL, mi
                              check_subject_overlap = TRUE,
                               checkpoint_dir = NULL, shard = NULL,
                               checkpoint_mismatch = c("recompute", "overwrite", "error"),
-                              seed = NULL,
+                              seed = NULL, tune_method = c("grid", "race_anova"), control = NULL,
                               on_complete = getOption("templecbe.on_complete", NULL), ...) {
   run_with_on_complete("cv_coxnet", on_complete, meta = list(v = v, mixture = mixture), expr = {
     cv_coxnet_impl(
@@ -245,7 +273,8 @@ cv_coxnet.formula <- function(formula, data, subject_id = NULL, group = NULL, mi
       recurrent = recurrent,
       parallel = parallel, parallel_over = parallel_over,
       check_subject_overlap = check_subject_overlap,
-      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed, ...
+      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed,
+      tune_method = tune_method, control = control, ...
     )
   })
 }
@@ -260,7 +289,7 @@ cv_coxnet.recipe <- function(x, data, subject_id = NULL, group = NULL, mixture =
                              check_subject_overlap = TRUE,
                              checkpoint_dir = NULL, shard = NULL,
                              checkpoint_mismatch = c("recompute", "overwrite", "error"),
-                              seed = NULL,
+                              seed = NULL, tune_method = c("grid", "race_anova"), control = NULL,
                              on_complete = getOption("templecbe.on_complete", NULL), ...) {
   run_with_on_complete("cv_coxnet", on_complete, meta = list(v = v, mixture = mixture), expr = {
     cv_coxnet_impl(
@@ -270,7 +299,8 @@ cv_coxnet.recipe <- function(x, data, subject_id = NULL, group = NULL, mixture =
       recurrent = recurrent,
       parallel = parallel, parallel_over = parallel_over,
       check_subject_overlap = check_subject_overlap,
-      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed, ...
+      checkpoint_dir = checkpoint_dir, shard = shard, checkpoint_mismatch = checkpoint_mismatch, seed = seed,
+      tune_method = tune_method, control = control, ...
     )
   })
 }
@@ -371,8 +401,17 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
                            checkpoint_dir = NULL,
                            shard = NULL,
                            checkpoint_mismatch = c("recompute", "overwrite", "error"),
-                           seed = NULL, ...) {
+                           seed = NULL, tune_method = c("grid", "race_anova"), control = NULL, ...) {
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
+  tune_method <- match.arg(tune_method)
+  race <- if (tune_method == "race_anova") race_coxnet_control(control) else NULL
+  if (!is.null(race) && !is.null(checkpoint_dir)) {
+    stop(
+      "`tune_method = \"race_anova\"` does not checkpoint: which candidates a resample scores ",
+      "depends on the resamples scored before it. Use `tune_method = \"grid\"` with `checkpoint_dir`.",
+      call. = FALSE
+    )
+  }
   rlang::check_installed(
     c("glmnet", "survival", "rsample", "yardstick", "withr"),
     reason = "to cross-validate `coxnet()` models."
@@ -470,7 +509,10 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     check_resample_overlap(resamples, spec, "`resamples`")
   }
 
-  score_split <- function(split, id) {
+  # `active` holds, for each `mixture`, the penalties still to be scored: the
+  # whole path in a grid search, the surviving candidates while racing (an
+  # empty vector skips that mixture's fit).
+  score_split <- function(split, id, active = paths) {
     analysis <- rsample::analysis(split)
     assessment <- rsample::assessment(split)
     train <- spec$fit_frame(analysis)
@@ -488,13 +530,14 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     if (gap_mode) {
       # Gap-time concordance needs no censoring weights and no baseline
       # hazard: each assessment interval is scored by its linear predictor.
-      return(purrr::list_rbind(purrr::map2(mixture, paths, function(m, path) {
+      return(purrr::list_rbind(purrr::pmap(list(mixture, paths, active), function(m, path, score_at) {
+        if (!length(score_at)) return(NULL)
         fit <- tryCatch(fit_glmnet_cox(train$x, train$y, m, path, glmnet_args), error = function(e) e)
         if (inherits(fit, "error")) {
           warning("glmnet failed on a resample at mixture ", m, ": ", conditionMessage(fit), call. = FALSE)
           return(NULL)
         }
-        res <- score_gap_path(fit, test$x, test$y, subject_test, penalty = path)
+        res <- score_gap_path(fit, test$x, test$y, subject_test, penalty = score_at)
         res$mixture <- m
         res
       })))
@@ -503,7 +546,8 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     truth_test <- surv_subject_truth(test$y, subject_test, recurrent = recurrent)
     weights <- graf_weights(truth_test$.truth, eval_time, censoring_km(truth_train$.truth), trunc)
 
-    purrr::list_rbind(purrr::map2(mixture, paths, function(m, path) {
+    purrr::list_rbind(purrr::pmap(list(mixture, paths, active), function(m, path, score_at) {
+      if (!length(score_at)) return(NULL)
       fit <- tryCatch(fit_glmnet_cox(train$x, train$y, m, path, glmnet_args), error = function(e) e)
       if (inherits(fit, "error")) {
         warning("glmnet failed on a resample at mixture ", m, ": ", conditionMessage(fit), call. = FALSE)
@@ -511,7 +555,7 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
       }
       res <- score_coxnet_path(
         fit, train$x, train$y, test$x, test$y, subject_test,
-        penalty = path, eval_time = eval_time, truth = truth_test, weights = weights,
+        penalty = score_at, eval_time = eval_time, truth = truth_test, weights = weights,
         metrics = metrics, info = info, covariates = covariates
       )
       res$mixture <- m
@@ -655,11 +699,23 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
       purrr::map2(resamples$splits, seq_len(n_splits), eval_split_ckpt)
     }
   } else {
-    results <- if (isTRUE(is_parallel)) {
-      rlang::check_installed(c("furrr", "future"), reason = "to fit folds in parallel.")
-      furrr::future_map2(resamples$splits, fold_ids, score_split, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
+    map_splits <- function(splits, ids) {
+      if (isTRUE(is_parallel)) {
+        rlang::check_installed(c("furrr", "future"), reason = "to fit folds in parallel.")
+        furrr::future_map2(splits, ids, score_split, .options = furrr::furrr_options(seed = TRUE, packages = furrr_worker_packages()))
+      } else {
+        purrr::map2(splits, ids, score_split)
+      }
+    }
+    if (is.null(race)) {
+      results <- map_splits(resamples$splits, fold_ids)
     } else {
-      purrr::map2(resamples$splits, fold_ids, score_split)
+      raced <- race_coxnet_resamples(
+        resamples$splits, fold_ids, score_split = score_split, map_splits = map_splits,
+        mixture = mixture, paths = paths, info = info, metric = metric,
+        eval_time = eval_time, control = race
+      )
+      results <- raced$results
     }
   }
 
@@ -688,10 +744,19 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
   dynamic <- info$class[info$metric == metric] == "dynamic_survival_metric"
   direction <- info$direction[info$metric == metric]
   metric_eval_time <- if (dynamic) eval_time[1] else NA_real_
-  selection <- select_coxnet_penalty(summary, metric, direction, metric_eval_time)
-  best_by_mixture <- purrr::list_rbind(lapply(unique(summary$mixture), function(m) {
+  race_info <- NULL
+  # A raced candidate that was eliminated was scored on fewer resamples than
+  # the survivors, so, as in finetune, settings are chosen among survivors.
+  candidates <- summary
+  if (!is.null(race)) {
+    race_info <- raced$candidates
+    survivors <- race_info[!race_info$eliminated, c("mixture", "penalty"), drop = FALSE]
+    candidates <- dplyr::semi_join(summary, survivors, by = c("mixture", "penalty"))
+  }
+  selection <- select_coxnet_penalty(candidates, metric, direction, metric_eval_time)
+  best_by_mixture <- purrr::list_rbind(lapply(unique(candidates$mixture), function(m) {
     s <- tryCatch(
-      select_coxnet_penalty(summary[summary$mixture == m, ], metric, direction, metric_eval_time),
+      select_coxnet_penalty(candidates[candidates$mixture == m, ], metric, direction, metric_eval_time),
       error = function(e) NULL
     )
     if (is.null(s)) return(NULL)
@@ -721,7 +786,9 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
       recurrent = recurrent,
       fit = new_coxnet(final, selection$lambda_min, selection$mixture, full$x, full$y, full$blueprint),
       resamples = resamples,
-      shard_partial = partial_shard
+      shard_partial = partial_shard,
+      tune_method = tune_method,
+      race = race_info
     ),
     class = "cv_coxnet"
   )

@@ -1,3 +1,12 @@
+# TempleCBE (development version)
+
+## New features
+
+* **Racing start/stop (counting-process) data.** `nested_cv_coxnet(tune_method = "race_anova")` used to stop on `Surv(start, stop, event)` outcomes, because racing ran on finetune and the yardstick survival metrics accept only a right-censored truth (and tune scores each start/stop row as if it were a subject). Start/stop outcomes, and gap mode (`recurrent = "gap"`), are now raced on glmnet directly, with the subject-level scoring of the grid search: one right-censored truth per subject and survival integrated over the subject's intervals. The elimination rule is finetune's: after `burn_in` resamples, the selection metric is modelled as `.estimate ~ candidate + resample`, and a candidate whose `1 - alpha` confidence interval for its difference from the current best lies entirely on the worse side is dropped; later resamples score only the survivors, and a mixture with no surviving penalty is no longer fit. `metric`, `rule`, `penalty`, `covariates` and `recurrent` apply as in the grid search. Right-censored outcomes are still raced with `finetune::tune_race_anova()`, as before.
+* **`cv_coxnet(tune_method = "race_anova", control =)`** runs the same race for any outcome. `control` is a list or a `finetune::control_race()` object (`burn_in`, default 3; `alpha`, default 0.05; `randomize`, default `TRUE`). The result keeps `tune_method` and gains `race`, one row per candidate with the number of resamples it was scored on and whether it was eliminated; settings are chosen among the survivors. Racing cannot be checkpointed.
+* **`nested_cv_coxnet(control =)`** passes racing settings to either race (a plain list becomes a `control_race_survival()` for finetune), and is part of the checkpoint fingerprint.
+* `nested_cv_coxnet(tune_method = "race_win_loss")` on start/stop data now stops with a message pointing to `"race_anova"`.
+
 # TempleCBE 0.12.0
 
 Per-workflow options in checkpointed workflow sets, and survival export, cutpoint and pipeline-portability features promoted from project code. As in 0.11.x, nothing depends on forking: it applies alike on Windows, macOS, Linux x86-64 and Linux ARM64 (DGX Spark).
