@@ -147,8 +147,7 @@ predict.coxnet_model <- function(object, new_data, type = c("linear_pred", "surv
       stop("`eval_time` is required for `type = \"survival\"`.", call. = FALSE)
     }
     check_eval_time(eval_time, min_length = 1)
-    train <- surv_components(object$y)
-    bh <- breslow_cumhaz(coxnet_link(object$fit, object$x, penalty), train$start, train$stop, train$status)
+    bh <- coxnet_baseline(object, penalty)$cumhaz
     surv <- exp(-outer(exp(lp), cumhaz_at(bh, eval_time)[, 1]))
     tibble::tibble(.pred = lapply(seq_along(lp), function(i) {
       tibble::tibble(.eval_time = eval_time, .pred_survival = surv[i, ])
@@ -176,9 +175,12 @@ tidy.coxnet_model <- function(x, penalty = NULL, ...) {
 #' @rdname templecbe_methods
 #' @export
 print.coxnet_model <- function(x, ...) {
-  type <- attr(x$y, "type")
-  cat("<coxnet_model> penalized Cox model (", if (type == "counting") "start/stop" else "right-censored", " outcome)\n", sep = "")
-  cat("  rows:", nrow(x$x), " predictors:", ncol(x$x), " events:", sum(surv_components(x$y)$status), "\n")
+  info <- coxnet_training_info(x)
+  cat("<coxnet_model> penalized Cox model (", if (identical(info$type, "counting")) "start/stop" else "right-censored", " outcome)\n", sep = "")
+  cat("  rows:", info$n_rows, " predictors:", info$n_predictors, " events:", info$n_events, "\n")
+  if (!coxnet_has_training_data(x)) {
+    cat("  training data removed by butcher; survival predictions only at the default penalty\n")
+  }
   cat("  mixture:", format(x$mixture), " penalties on path:", length(x$fit$lambda), "\n")
   cat("  default penalty:", if (is.null(x$penalty)) "none (pass `penalty` to predict())" else format(x$penalty, digits = 4), "\n")
   invisible(x)
@@ -442,12 +444,70 @@ coxnet_link <- function(fit, x, penalty) {
 # Area under each subject's predicted survival curve from 0 to the last time
 # seen in training, the restricted mean survival time.
 restricted_mean_survival <- function(object, lp, penalty) {
-  train <- surv_components(object$y)
-  bh <- breslow_cumhaz(coxnet_link(object$fit, object$x, penalty), train$start, train$stop, train$status)
-  tmax <- max(train$stop)
+  base <- coxnet_baseline(object, penalty)
+  bh <- base$cumhaz
+  tmax <- base$tmax
   knots <- c(0, bh$time[bh$time < tmax], tmax)
   cumhaz <- cumhaz_at(bh, utils::head(knots, -1))[, 1]
   colSums(exp(-outer(cumhaz, exp(lp))) * diff(knots))
+}
+
+#' Breslow Baseline of a `coxnet` Model at a Penalty
+#'
+#' From the training data when the model has it; otherwise, for a model whose
+#' training data `butcher::axe_data()` removed, the baseline it stored at the
+#' model's default penalty.
+#'
+#' @param object A `coxnet_model`.
+#' @param penalty A single penalty.
+#' @return A list with `cumhaz` (as from `breslow_cumhaz()`) and `tmax`, the
+#'   last training follow-up time.
+#' @keywords internal
+#' @noRd
+coxnet_baseline <- function(object, penalty) {
+  if (coxnet_has_training_data(object)) {
+    train <- surv_components(object$y)
+    return(list(
+      cumhaz = breslow_cumhaz(coxnet_link(object$fit, object$x, penalty), train$start, train$stop, train$status),
+      tmax = max(train$stop)
+    ))
+  }
+  stored <- object$baseline
+  if (!is.null(stored) && isTRUE(all.equal(penalty, stored$penalty))) {
+    return(stored)
+  }
+  stop(
+    "This model's training data was removed with `butcher::axe_data()`, so survival and time ",
+    "predictions are available only at its default penalty",
+    if (!is.null(stored)) paste0(" (", format(stored$penalty, digits = 4), ")") else " (it had none)",
+    ". Refit, or keep the training data, to predict at another penalty.",
+    call. = FALSE
+  )
+}
+
+#' Does a `coxnet` Model Still Hold Its Training Data?
+#'
+#' `butcher::axe_data()` keeps a zero-row `x` (its column names are what
+#' `forge_matrix()` orders new data by) and removes `y`.
+#' @param object A `coxnet_model`.
+#' @keywords internal
+#' @noRd
+coxnet_has_training_data <- function(object) {
+  !is.null(object$y) && !is.null(object$x) && nrow(object$x) > 0L
+}
+
+#' Size and Outcome Type of a `coxnet` Model's Training Data
+#' @param object A `coxnet_model`.
+#' @keywords internal
+#' @noRd
+coxnet_training_info <- function(object) {
+  if (coxnet_has_training_data(object)) {
+    return(list(
+      type = attr(object$y, "type"), n_rows = nrow(object$x), n_predictors = ncol(object$x),
+      n_events = sum(surv_components(object$y)$status)
+    ))
+  }
+  object$training_info %||% list(type = NA_character_, n_rows = NA, n_predictors = NA, n_events = NA)
 }
 
 cumhaz_at <- function(bh, times) {

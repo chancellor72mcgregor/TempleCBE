@@ -463,7 +463,11 @@ joint_status_time_predictions <- function(object, predictors) {
 #' @noRd
 joint_raw_predictors <- function(object) {
   comp <- object$components
-  comp$raw_predictors %||% comp$data[names(comp$blueprint$ptypes$predictors)]
+  out <- comp$raw_predictors %||% comp$data[names(comp$blueprint$ptypes$predictors)]
+  if (is.null(out)) {
+    stop("This model's training data was removed with `butcher::axe_data()`; pass `data`.", call. = FALSE)
+  }
+  out
 }
 
 #' Extract Survival Outcome Components and Predictors
@@ -566,6 +570,9 @@ predict.joint_model <- function(object, new_data = NULL, eval_time = NULL, type 
   rlang::check_dots_empty()
   if (is.null(new_data)) {
     new_data <- object$components$data
+    if (is.null(new_data)) {
+      stop("This model's training data was removed with `butcher::axe_data()`; pass `new_data`.", call. = FALSE)
+    }
   }
   eval_time <- eval_time %||% object$eval_time
   forged <- hardhat::forge(new_data, object$components$blueprint)
@@ -809,13 +816,21 @@ cv_joint_model <- function(data,
     }
   }
 
-  run_fold <- function(i) {
-    split <- resamples$splits[[i]]
-    id <- resamples$id[i]
-    scored <- joint_model_fold_scores(
-      rsample::analysis(split), rsample::assessment(split), outcome, subject_id, engine, calibration,
-      covariates = covariates, where = paste0("resample `", id, "`"), ...
-    )
+  # A fold's function receives its own split (`fold`, from `fold_items`) and
+  # travels to a worker with only what it uses: holding `resamples` would send
+  # every split to every worker, and `serialize()` writes each split's data
+  # separately.
+  fit_args <- list(...)
+  run_fold <- function(fold) {
+    split <- fold$split
+    id <- fold$id
+    scored <- do.call(joint_model_fold_scores, c(
+      list(
+        rsample::analysis(split), rsample::assessment(split), outcome, subject_id, engine, calibration,
+        covariates = covariates, where = paste0("resample `", id, "`")
+      ),
+      fit_args
+    ))
     if (is.null(scored)) {
       return(NULL)
     }
@@ -825,8 +840,14 @@ cv_joint_model <- function(data,
     out
   }
 
+  run_fold <- with_worker_env(
+    run_fold,
+    outcome = outcome, subject_id = subject_id, engine = engine, calibration = calibration,
+    covariates = covariates, fit_args = fit_args
+  )
   fold_ids <- seq_along(resamples$splits)
   n_splits <- length(fold_ids)
+  fold_items <- lapply(fold_ids, function(i) list(i = i, split = resamples$splits[[i]], id = resamples$id[i]))
 
   if (!is.null(checkpoint_dir)) {
     if (!dir.exists(checkpoint_dir)) {
@@ -850,8 +871,9 @@ cv_joint_model <- function(data,
     shard <- validate_shard_spec(shard)
     active_mask <- shard_active_mask(n_splits, shard)
 
-    eval_fold_ckpt <- function(i) {
-      sp_id <- resamples$id[i]
+    eval_fold_ckpt <- function(fold) {
+      i <- fold$i
+      sp_id <- fold$id
       safe_id <- gsub("[^A-Za-z0-9._-]", "_", sp_id)
       cf <- file.path(checkpoint_dir, sprintf("cv_joint_%s.rds", safe_id))
       exp_fp <- split_fps[i]
@@ -866,7 +888,7 @@ cv_joint_model <- function(data,
         return(NULL)
       }
 
-      val <- run_fold(i)
+      val <- run_fold(fold)
       if (!is.null(val)) {
         write_verified_checkpoint(
           val, cf, fingerprint = exp_fp, run_fingerprint = run_fp,
@@ -875,19 +897,24 @@ cv_joint_model <- function(data,
       }
       val
     }
+    eval_fold_ckpt <- with_worker_env(
+      eval_fold_ckpt,
+      checkpoint_dir = checkpoint_dir, split_fps = split_fps, active_mask = active_mask,
+      run_fold = run_fold, run_fp = run_fp
+    )
 
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel joint cross-validation.")
-      furrr::future_map(fold_ids, eval_fold_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
+      furrr::future_map(fold_items, eval_fold_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
     } else {
-      purrr::map(fold_ids, eval_fold_ckpt)
+      purrr::map(fold_items, eval_fold_ckpt)
     }
   } else {
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel joint cross-validation.")
-      furrr::future_map(fold_ids, run_fold, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
+      furrr::future_map(fold_items, run_fold, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine)))
     } else {
-      purrr::map(fold_ids, run_fold)
+      purrr::map(fold_items, run_fold)
     }
   }
 
@@ -989,8 +1016,11 @@ nested_cv_joint_model <- function(object,
     )
   }
 
-  run_outer <- function(i) {
-    outer_split <- object$splits[[i]]
+  # Each outer split travels to a worker as its own item (`outer`, from
+  # `outer_items`), with its inner resamples, rather than inside `object`:
+  # see cv_joint_model().
+  run_outer <- function(outer) {
+    outer_split <- outer$split
     analysis_df <- rsample::analysis(outer_split)
     assessment_df <- rsample::assessment(outer_split)
 
@@ -1006,7 +1036,7 @@ nested_cv_joint_model <- function(object,
         workflows::add_formula(outcome)
       race_res <- tune_race_survival(
         wflow,
-        resamples = object$inner_resamples[[i]],
+        resamples = outer$inner,
         fn = if (tune_method == "race_anova") "tune_race_anova" else "tune_race_win_loss",
         grid = 15,
         eval_time = fit_args$eval_time
@@ -1026,19 +1056,27 @@ nested_cv_joint_model <- function(object,
         list(
           analysis_df, assessment_df, outcome, subject_id, engine, calibration,
           covariates = covariates,
-          where = paste0("the outer assessment set of split `", object$id[i], "`")
+          where = paste0("the outer assessment set of split `", outer$id, "`")
         ),
         fold_args
       )
     )
     if (is.null(scored)) {
-      stop("Outer split `", object$id[i], "` has no assessment subject to score.", call. = FALSE)
+      stop("Outer split `", outer$id, "` has no assessment subject to score.", call. = FALSE)
     }
-    tibble::tibble(outer_id = object$id[i], model = scored$ibs$model, ibs = scored$ibs$ibs)
+    tibble::tibble(outer_id = outer$id, model = scored$ibs$model, ibs = scored$ibs$ibs)
   }
+  run_outer <- with_worker_env(
+    run_outer,
+    tune_method = tune_method, outcome = outcome, fit_args = fit_args, subject_id = subject_id,
+    engine = engine, calibration = calibration, covariates = covariates
+  )
 
   outer_ids <- seq_along(object$splits)
   n_outer <- length(outer_ids)
+  outer_items <- lapply(outer_ids, function(i) {
+    list(i = i, split = object$splits[[i]], inner = object$inner_resamples[[i]], id = object$id[i])
+  })
 
   if (!is.null(checkpoint_dir)) {
     if (!dir.exists(checkpoint_dir)) {
@@ -1063,8 +1101,9 @@ nested_cv_joint_model <- function(object,
     shard <- validate_shard_spec(shard)
     active_mask <- shard_active_mask(n_outer, shard)
 
-    eval_outer_ckpt <- function(i) {
-      sp_id <- object$id[i]
+    eval_outer_ckpt <- function(outer) {
+      i <- outer$i
+      sp_id <- outer$id
       safe_id <- gsub("[^A-Za-z0-9._-]", "_", sp_id)
       cf <- file.path(checkpoint_dir, sprintf("nested_joint_%s.rds", safe_id))
       exp_fp <- split_fps[i]
@@ -1079,7 +1118,7 @@ nested_cv_joint_model <- function(object,
         return(NULL)
       }
 
-      val <- run_outer(i)
+      val <- run_outer(outer)
       if (!is.null(val)) {
         write_verified_checkpoint(
           val, cf, fingerprint = exp_fp, run_fingerprint = run_fp,
@@ -1088,19 +1127,24 @@ nested_cv_joint_model <- function(object,
       }
       val
     }
+    eval_outer_ckpt <- with_worker_env(
+      eval_outer_ckpt,
+      checkpoint_dir = checkpoint_dir, split_fps = split_fps, active_mask = active_mask,
+      run_outer = run_outer, run_fp = run_fp
+    )
 
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel nested cross-validation.")
-      furrr::future_map(outer_ids, eval_outer_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
+      furrr::future_map(outer_items, eval_outer_ckpt, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
     } else {
-      purrr::map(outer_ids, eval_outer_ckpt)
+      purrr::map(outer_items, eval_outer_ckpt)
     }
   } else {
     rows <- if (isTRUE(parallel)) {
       rlang::check_installed(c("furrr", "future"), reason = "for parallel nested cross-validation.")
-      furrr::future_map(outer_ids, run_outer, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
+      furrr::future_map(outer_items, run_outer, .options = furrr::furrr_options(seed = TRUE, packages = joint_worker_packages(engine, tune_method)))
     } else {
-      purrr::map(outer_ids, run_outer)
+      purrr::map(outer_items, run_outer)
     }
   }
 

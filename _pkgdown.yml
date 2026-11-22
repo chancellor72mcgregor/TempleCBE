@@ -153,6 +153,7 @@ reference:
       - tidy.coxnet_model
       - cv_coxnet
       - cv_coxnet-methods
+      - templecbe-butcher
       - nested_cv_coxnet
       - surv_subject_truth
       - validate_start_stop
@@ -183,6 +184,7 @@ reference:
       - tune_race_survival_checkpointed
       - collect_checkpoints
       - clean_checkpoints
+      - compact_checkpoints
       - invalidate_downstream_checkpoints
       - estimate_runtime
       - nested_survival_run
