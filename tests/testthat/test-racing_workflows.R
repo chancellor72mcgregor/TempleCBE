@@ -290,7 +290,7 @@ test_that("nested_cv_joint_model races the Cox penalty on the inner resamples", 
   )
 })
 
-test_that("racing stops early, with the reason, on start/stop outcomes", {
+test_that("finetune racing stops early, with the reason, on start/stop outcomes", {
   skip_if_no_racing_deps()
 
   set.seed(45)
@@ -316,10 +316,12 @@ test_that("racing stops early, with the reason, on start/stop outcomes", {
     ),
     "needs a right-censored outcome"
   )
+  # nested_cv_coxnet() races start/stop data on glmnet (test-race_coxnet.R);
+  # only win-loss racing, which needs finetune, still stops.
   expect_error(
     nested_cv_coxnet(
       folds, survival::Surv(tstart, tstop, status) ~ x1 + x2,
-      subject_id = "subject_id", tune_method = "race_anova"
+      subject_id = "subject_id", tune_method = "race_win_loss"
     ),
     "needs a right-censored outcome"
   )

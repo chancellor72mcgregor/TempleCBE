@@ -35,6 +35,8 @@ cv_coxnet(x, ...)
   shard = NULL,
   checkpoint_mismatch = c("recompute", "overwrite", "error"),
   seed = NULL,
+  tune_method = c("grid", "race_anova"),
+  control = NULL,
   on_complete = getOption("templecbe.on_complete", NULL),
   ...
 )
@@ -61,6 +63,8 @@ cv_coxnet(x, ...)
   shard = NULL,
   checkpoint_mismatch = c("recompute", "overwrite", "error"),
   seed = NULL,
+  tune_method = c("grid", "race_anova"),
+  control = NULL,
   on_complete = getOption("templecbe.on_complete", NULL),
   ...
 )
@@ -87,6 +91,8 @@ cv_coxnet(x, ...)
   shard = NULL,
   checkpoint_mismatch = c("recompute", "overwrite", "error"),
   seed = NULL,
+  tune_method = c("grid", "race_anova"),
+  control = NULL,
   on_complete = getOption("templecbe.on_complete", NULL),
   ...
 )
@@ -113,6 +119,8 @@ cv_coxnet(x, ...)
   shard = NULL,
   checkpoint_mismatch = c("recompute", "overwrite", "error"),
   seed = NULL,
+  tune_method = c("grid", "race_anova"),
+  control = NULL,
   on_complete = getOption("templecbe.on_complete", NULL),
   ...
 )
@@ -196,6 +204,15 @@ evaluates shard `i` of `n` resample folds.}
 `NULL`, defaults to `1L` to ensure cross-validation fold partitions are
 identical across calls, enabling instant checkpoint reuse.}
 
+\item{tune_method}{`"grid"` (default) scores every candidate on every
+resample; `"race_anova"` races them; see Details.}
+
+\item{control}{Racing settings, used when `tune_method = "race_anova"`: a
+list or a [finetune::control_race()] object, of which `burn_in` (default
+`3`, at most the number of resamples minus one), `alpha` (default `0.05`)
+and `randomize` (default `TRUE`, shuffle the order of the resamples) are
+used.}
+
 \item{on_complete}{Optional callback `function(result)` invoked when
 `cv_coxnet()` finishes or errors (defaults to
 `getOption("templecbe.on_complete", NULL)`).}
@@ -215,7 +232,9 @@ A `cv_coxnet` object, with:
   * `fit`: a [coxnet()] model fit to all of `data` at the chosen `mixture`,
     with `lambda_min` as its default penalty;
   * `eval_time`, `resamples`, `covariates`, and `recurrent` (how recurrent
-    data were scored: `"error"`, `"first"`, or `"gap"`).
+    data were scored: `"error"`, `"first"`, or `"gap"`);
+  * `tune_method`, and `race`: with racing, one row per candidate
+    (`mixture`, `penalty`, `n_resamples`, `eliminated`), else `NULL`.
 
   Use `predict()`, `tidy()`, `autoplot()`, and `tune::collect_metrics()` on
   it.
@@ -279,6 +298,23 @@ work, not part of this draft.
 with the best mean `metric` over folds (for time-specific metrics, at the
 first `eval_time`). `lambda.1se` is the largest penalty, at the same
 mixture, whose mean is within one standard error of that best mean.
+
+**Racing.** With `tune_method = "race_anova"`, the candidates (every
+`mixture` and penalty) are raced over the resamples the way
+[finetune::tune_race_anova()] races a tuning grid, but on glmnet directly,
+so it works for start/stop data and in gap mode, which finetune cannot
+score. The first `burn_in` resamples score every candidate. Before each
+later resample, the selection `metric` is modelled as
+`.estimate ~ candidate + resample` and a candidate is dropped when the
+`1 - alpha` confidence interval of its difference from the current best is
+entirely on the worse side; the next resamples score only the survivors, and
+a mixture with no surviving penalty is no longer fit. Settings are chosen
+among the survivors, so `lambda.1se` is the largest surviving penalty within
+one standard error. `metrics` and `fold_metrics` keep the eliminated
+candidates, with their smaller `n`; `race` lists every candidate with the
+number of resamples it was scored on and whether it was eliminated. Racing
+runs the resamples after the burn-in one at a time and cannot be
+checkpointed.
 }
 \examples{
 \donttest{

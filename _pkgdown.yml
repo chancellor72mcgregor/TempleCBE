@@ -155,6 +155,8 @@ reference:
       - cv_coxnet-methods
       - templecbe-butcher
       - nested_cv_coxnet
+      - tune_start_stop
+      - collapse_start_stop_predictions
       - surv_subject_truth
       - validate_start_stop
       - prune_start_stop

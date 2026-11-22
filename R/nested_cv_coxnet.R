@@ -39,6 +39,25 @@
 #'     and choosing a single final model specification for reporting or deployment.
 #' }
 #'
+#' @section Racing:
+#' With `tune_method = "race_anova"`, how the inner resamples are raced depends
+#' on the outcome:
+#' \itemize{
+#'   \item \strong{Start/stop data}, `Surv(start, stop, event)`, and gap mode:
+#'     the race runs inside [cv_coxnet()] on glmnet directly (see "Racing" in
+#'     [cv_coxnet()]). It uses finetune's elimination rule but scores at the
+#'     subject level, like the grid search, so `metric`, `rule`, `penalty`,
+#'     `covariates` and `recurrent` apply as they do for `"grid"`.
+#'     [finetune::tune_race_anova()] cannot be used here: the yardstick
+#'     survival metrics need a right-censored truth, and tune scores each
+#'     start/stop row as if it were a subject.
+#'   \item \strong{Right-censored data}, `Surv(time, status)`: the race is
+#'     [finetune::tune_race_anova()] on a parsnip `proportional_hazards()`
+#'     workflow, through [tune_race_survival()], selecting by `metric`
+#'     (default `"brier_survival_integrated"`).
+#' }
+#' `"race_win_loss"` is available for right-censored data only.
+#'
 #' @param object An [rsample::nested_cv()] object.
 #' @param preprocessor A formula with a `Surv()` outcome, or a
 #'   [recipes::recipe()] whose outcome is a `Surv` column.
@@ -66,11 +85,15 @@
 #'   Details and [cv_coxnet()]. `FALSE` skips the check.
 #' @param tune_method Method for tuning hyperparameters across the inner resamples:
 #'   `"grid"` (default, standard [cv_coxnet()] grid search), `"race_anova"`
-#'   ([finetune::tune_race_anova()] racing), or `"race_win_loss"`
-#'   ([finetune::tune_race_win_loss()] racing; needs BradleyTerry2).
+#'   (ANOVA racing), or `"race_win_loss"`
+#'   ([finetune::tune_race_win_loss()] racing; needs BradleyTerry2). See
+#'   "Racing" below.
+#' @param control Racing settings for `tune_method = "race_anova"` or
+#'   `"race_win_loss"`: a list or a [finetune::control_race()] object. See
+#'   [cv_coxnet()] for the fields the start/stop race uses.
 #' @param recurrent How recurrent (start/stop) data are scored, as in
 #'   [cv_coxnet()]: `"error"` (default), `"first"`, or `"gap"` (gap-time
-#'   concordance; needs `tune_method = "grid"`).
+#'   concordance; needs `tune_method = "grid"` or `"race_anova"`).
 #' @param checkpoint_dir Optional directory path where per-split checkpoints are stored.
 #' @param shard Optional shard specification (e.g. `c(1, 2)`) for distributed computation.
 #' @param checkpoint_mismatch Action on mismatch: `"recompute"`, `"overwrite"`, or `"error"`.
@@ -121,6 +144,7 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
                              loco_mp_B = 30L,
                              check_subject_overlap = TRUE,
                              tune_method = c("grid", "race_anova", "race_win_loss"),
+                             control = NULL,
                              checkpoint_dir = NULL,
                              shard = NULL,
                              checkpoint_mismatch = c("recompute", "overwrite", "error"),
@@ -145,8 +169,12 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
   }
   metrics <- metrics %||% default_surv_metrics()
   if (gap_mode) {
-    if (tune_method != "grid") {
-      stop("`recurrent = \"gap\"` needs `tune_method = \"grid\"`: the racing tuners score by IBS.", call. = FALSE)
+    if (tune_method == "race_win_loss") {
+      stop(
+        "`recurrent = \"gap\"` needs `tune_method = \"grid\"` or `\"race_anova\"`: ",
+        "win-loss racing runs on finetune, which cannot score gap times.",
+        call. = FALSE
+      )
     }
     gap_info <- surv_metric_info(metrics)
     if (!all(gap_info$metric == "concordance_survival")) {
@@ -162,8 +190,17 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
 
   full_data <- object$splits[[1]]$data
   spec <- make_coxnet_spec(preprocessor, full_data, subject_id, group)
-  if (tune_method != "grid") {
-    check_race_outcome_type(surv_components(spec$fit_frame(full_data)$y)$type, tune_method)
+  # Start/stop outcomes (and gap mode) are raced inside cv_coxnet_impl() on
+  # glmnet, with subject-level scoring; finetune races right-censored ones.
+  outcome_type <- if (tune_method != "grid") surv_components(spec$fit_frame(full_data)$y)$type else NULL
+  native_race <- tune_method == "race_anova" && (identical(outcome_type, "counting") || gap_mode)
+  if (tune_method == "race_win_loss" && identical(outcome_type, "counting")) {
+    stop(
+      "`tune_method = \"race_win_loss\"` needs a right-censored outcome, Surv(time, status): it runs on ",
+      "finetune, whose yardstick metrics cannot score start/stop data. Use `tune_method = \"race_anova\"`, ",
+      "which races start/stop data on glmnet directly.",
+      call. = FALSE
+    )
   }
   # The outer splits and every inner resample are user-supplied, so all of them
   # are checked here, before any model is fit; the inner cross-validations below
@@ -207,7 +244,7 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
     analysis <- rsample::analysis(outer)
     assessment <- rsample::assessment(outer)
 
-    if (tune_method %in% c("race_anova", "race_win_loss")) {
+    if (tune_method %in% c("race_anova", "race_win_loss") && !native_race) {
       rlang::check_installed(c("finetune", "parsnip", "workflows", "tune"), reason = "for racing in nested_cv_coxnet.")
       mix_param <- if (length(mixture) == 1) mixture else tune::tune()
       spec_cox <- parsnip::set_engine(
@@ -227,7 +264,8 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         fn = if (tune_method == "race_anova") "tune_race_anova" else "tune_race_win_loss",
         grid = if (is.numeric(penalty)) length(penalty) else 20,
         metrics = metrics,
-        eval_time = eval_time
+        eval_time = eval_time,
+        control = race_finetune_control(control)
       )
       best <- tune::select_best(race_res, metric = metric %||% "brier_survival_integrated")
       chosen_mix <- if ("mixture" %in% names(best)) best$mixture else mixture[1]
@@ -246,7 +284,8 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         spec, data = analysis, mixture = mixture, penalty = penalty,
         resamples = object$inner_resamples[[i]], metrics = metrics, eval_time = eval_time,
         metric = metric, covariates = covariates, trunc = trunc, recurrent = recurrent, parallel = FALSE,
-        check_subject_overlap = FALSE, ...
+        check_subject_overlap = FALSE,
+        tune_method = if (native_race) "race_anova" else "grid", control = control, ...
       )
       chosen_mix <- inner$mixture
       chosen <- if (rule == "min") inner$lambda_min else inner$lambda_1se
@@ -336,6 +375,7 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         mixture = mixture,
         penalty = penalty,
         tune_method = tune_method,
+        control = if (tune_method == "grid") NULL else race_coxnet_control(control),
         importance = importance,
         loco_mp_B = loco_mp_B,
         metrics = metric_set_names(metrics),
@@ -398,6 +438,18 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
   class(out) <- c("nested_cv_coxnet", class(out))
   out
   })
+}
+
+# A `control` for tune_race_survival(): NULL keeps its default; a plain list
+# is turned into a finetune::control_race() object.
+race_finetune_control <- function(control) {
+  if (is.null(control) || inherits(control, "control_race")) {
+    return(control)
+  }
+  if (!is.list(control)) {
+    stop("`control` must be NULL, a list, or a finetune::control_race() object.", call. = FALSE)
+  }
+  do.call(control_race_survival, control)
 }
 
 # The named arguments of `...` that loco_mp_coxnet() does not already take

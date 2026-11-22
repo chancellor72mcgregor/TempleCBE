@@ -24,6 +24,7 @@ nested_cv_coxnet(
   loco_mp_B = 30L,
   check_subject_overlap = TRUE,
   tune_method = c("grid", "race_anova", "race_win_loss"),
+  control = NULL,
   checkpoint_dir = NULL,
   shard = NULL,
   checkpoint_mismatch = c("recompute", "overwrite", "error"),
@@ -65,7 +66,7 @@ in `metrics` by default.}
 
 \item{recurrent}{How recurrent (start/stop) data are scored, as in
 [cv_coxnet()]: `"error"` (default), `"first"`, or `"gap"` (gap-time
-concordance; needs `tune_method = "grid"`).}
+concordance; needs `tune_method = "grid"` or `"race_anova"`).}
 
 \item{parallel}{If `TRUE`, fit folds with [furrr::future_map()]; set a
 [future::plan()] first.}
@@ -87,8 +88,13 @@ Details and [cv_coxnet()]. `FALSE` skips the check.}
 
 \item{tune_method}{Method for tuning hyperparameters across the inner resamples:
 `"grid"` (default, standard [cv_coxnet()] grid search), `"race_anova"`
-([finetune::tune_race_anova()] racing), or `"race_win_loss"`
-([finetune::tune_race_win_loss()] racing; needs BradleyTerry2).}
+(ANOVA racing), or `"race_win_loss"`
+([finetune::tune_race_win_loss()] racing; needs BradleyTerry2). See
+"Racing" below.}
+
+\item{control}{Racing settings for `tune_method = "race_anova"` or
+`"race_win_loss"`: a list or a [finetune::control_race()] object. See
+[cv_coxnet()] for the fields the start/stop race uses.}
 
 \item{checkpoint_dir}{Optional directory path where per-split checkpoints are stored.}
 
@@ -160,6 +166,27 @@ It is essential to select the appropriate validation and tuning workflow for you
     is ideal for comparing penalty properties (Ridge vs Lasso vs Elastic Net), profiling coefficient shrinkage paths across resamples,
     and choosing a single final model specification for reporting or deployment.
 }
+}
+
+\section{Racing}{
+
+With `tune_method = "race_anova"`, how the inner resamples are raced depends
+on the outcome:
+\itemize{
+  \item \strong{Start/stop data}, `Surv(start, stop, event)`, and gap mode:
+    the race runs inside [cv_coxnet()] on glmnet directly (see "Racing" in
+    [cv_coxnet()]). It uses finetune's elimination rule but scores at the
+    subject level, like the grid search, so `metric`, `rule`, `penalty`,
+    `covariates` and `recurrent` apply as they do for `"grid"`.
+    [finetune::tune_race_anova()] cannot be used here: the yardstick
+    survival metrics need a right-censored truth, and tune scores each
+    start/stop row as if it were a subject.
+  \item \strong{Right-censored data}, `Surv(time, status)`: the race is
+    [finetune::tune_race_anova()] on a parsnip `proportional_hazards()`
+    workflow, through [tune_race_survival()], selecting by `metric`
+    (default `"brier_survival_integrated"`).
+}
+`"race_win_loss"` is available for right-censored data only.
 }
 
 \examples{
