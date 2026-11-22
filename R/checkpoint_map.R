@@ -783,6 +783,7 @@ workflow_call_args <- function(dots, option, fn) {
 # A workflow set whose glmnet Cox workflows have `cox.ties` pinned to
 # getOption("templecbe.cox_ties"); see apply_workflow_cox_ties().
 apply_set_cox_ties <- function(object) {
+  if (!inherits(object, "workflow_set")) return(object)
   for (i in seq_len(nrow(object))) {
     object$info[[i]]$workflow[[1]] <- apply_workflow_cox_ties(object$info[[i]]$workflow[[1]])
   }
