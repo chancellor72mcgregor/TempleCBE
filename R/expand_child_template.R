@@ -4,14 +4,14 @@
 #' template for each row, join the pieces and [knitr::knit_child()] them. Use it in a chunk with
 #' `results = "asis"`.
 #'
-#' Each column of `param_grid` is a template variable: `{{feature}}` in the child is replaced by the
+#' Each column of `param_grid` is a template variable: \code{\{\{feature\}\}} in the child is replaced by the
 #' value in column `feature` (change the markers with `delim`). The rows are expanded in order.
 #'
 #' @param template_path Path of the child template.
 #' @param param_grid A data frame (or named list of equal-length vectors), one row per child.
 #' @param quiet Passed to [knitr::knit_child()] (default `TRUE`).
 #' @param sep Text between the expanded children (default a blank line).
-#' @param delim Template markers for [knitr::knit_expand()] (default `c("{{", "}}")`).
+#' @param delim Template markers for [knitr::knit_expand()] (default \code{c("\{\{", "\}\}")}).
 #' @param expand_only Return the expanded text without knitting it (default `FALSE`).
 #' @param envir Environment to knit in (default: the caller's).
 #' @return The knitted text, as `knitr::knit_child()` returns it (print it with `cat()`, or return
