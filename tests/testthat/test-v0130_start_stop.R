@@ -249,3 +249,17 @@ test_that("workflow_map_checkpointed() pins cox.ties on the workflow set it maps
   expect_equal(rlang::eval_tidy(pinned$eng_args$cox.ties), "breslow")
   expect_identical(apply_set_cox_ties("not a set"), "not a set")
 })
+
+test_that("add_subject_status() handles factor, character and logical status", {
+  d <- data.frame(id = c(1, 1, 2, 2), s = c(0, 1, 0, 0))
+  d$f <- factor(d$s)
+  d$g <- factor(d$s, labels = c("censored", "event"))
+  d$ch <- as.character(d$g)
+  d$l <- as.logical(d$s)
+  want <- c(1L, 1L, 0L, 0L)
+  expect_equal(add_subject_status(d, "id", "f")$subject_status, want)
+  expect_equal(add_subject_status(d, "id", "g", event = "event")$subject_status, want)
+  expect_equal(add_subject_status(d, "id", "ch", event = "event")$subject_status, want)
+  expect_equal(add_subject_status(d, "id", "l")$subject_status, want)
+  expect_error(add_subject_status(d, "id", "g"), "event = \"event\"")
+})

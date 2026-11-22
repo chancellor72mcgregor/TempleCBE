@@ -42,7 +42,11 @@ grouped folds without stratification.}
 
 \item{repeats}{The number of repeats of the outer folds.}
 
-\item{event}{The value of `status` that marks an event (default `1`).}
+\item{event}{The value of `status` that marks an event (default `1`). A
+factor or character `status` is matched on its labels, so a factor with
+levels `"0"`/`"1"` works as is, and one with levels
+`c("censored", "event")` needs `event = "event"` (an `event` that is not
+a label is an error). A logical `status` counts `TRUE` as the event.}
 
 \item{pool}{Passed to [rsample::group_vfold_cv()]: strata holding fewer
 than this share of the subjects are pooled.}

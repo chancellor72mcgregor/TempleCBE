@@ -19,7 +19,11 @@ add_subject_status(
 
 \item{status}{The event column, as a string.}
 
-\item{event}{The value of `status` that marks an event (default `1`).}
+\item{event}{The value of `status` that marks an event (default `1`). A
+factor or character `status` is matched on its labels, so a factor with
+levels `"0"`/`"1"` works as is, and one with levels
+`c("censored", "event")` needs `event = "event"` (an `event` that is not
+a label is an error). A logical `status` counts `TRUE` as the event.}
 
 \item{name}{The name of the new column (default `"subject_status"`).}
 }

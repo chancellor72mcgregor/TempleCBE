@@ -9,7 +9,11 @@
 #' @param data A data frame with one row per interval.
 #' @param subject_id The subject identifier column, as a string.
 #' @param status The event column, as a string.
-#' @param event The value of `status` that marks an event (default `1`).
+#' @param event The value of `status` that marks an event (default `1`). A
+#'   factor or character `status` is matched on its labels, so a factor with
+#'   levels `"0"`/`"1"` works as is, and one with levels
+#'   `c("censored", "event")` needs `event = "event"` (an `event` that is not
+#'   a label is an error). A logical `status` counts `TRUE` as the event.
 #' @param name The name of the new column (default `"subject_status"`).
 #' @return `data` with an integer column `name` added.
 #' @seealso [subject_vfold_cv()], [subject_nested_cv()]
@@ -37,7 +41,7 @@ add_subject_status <- function(data, subject_id, status, event = 1, name = "subj
   if (anyNA(ids)) {
     stop("`", subject_id, "` has missing values.", call. = FALSE)
   }
-  is_event <- !is.na(data[[status]]) & data[[status]] == event
+  is_event <- status_is_event(data[[status]], event, status)
   key <- match(ids, unique(ids))
   any_event <- tapply(is_event, key, any)
   data[[name]] <- as.integer(any_event[key])
@@ -142,6 +146,29 @@ subject_nested_cv <- function(data, subject_id, status = NULL, outer_v = 5, inne
     out$inner_resamples <- lapply(out$inner_resamples, drop_split_column, col = strata_col)
   }
   out
+}
+
+# Which rows of a status column are events. A factor or character status is
+# matched on its labels, so `event` must be one of them (`event = "event"`
+# for levels c("censored", "event")); a factor with levels "0"/"1" works
+# with the default `event = 1`. A logical status counts TRUE as the event.
+status_is_event <- function(x, event, status) {
+  if (is.logical(x)) {
+    return(!is.na(x) & x == as.logical(event))
+  }
+  if (is.factor(x) || is.character(x)) {
+    labels <- if (is.factor(x)) levels(x) else unique(stats::na.omit(x))
+    if (!as.character(event) %in% labels) {
+      stop(
+        "`event = ", format(event), "` is not a value of `", status, "` (",
+        paste(utils::head(labels, 10), collapse = ", "), "); pass the event label, e.g. `event = \"",
+        utils::tail(labels, 1), "\"`.",
+        call. = FALSE
+      )
+    }
+    return(!is.na(x) & as.character(x) == as.character(event))
+  }
+  !is.na(x) & x == event
 }
 
 subject_strata_column <- function(data, status) {
