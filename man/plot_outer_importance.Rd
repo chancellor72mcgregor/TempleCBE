@@ -14,8 +14,8 @@ plot_outer_importance(
 )
 }
 \arguments{
-\item{x}{A tibble from [tidy_outer_coefficients()], [score_outer()], or
-[summarize_outer_importance()].}
+\item{x}{A tibble from [tidy_outer_coefficients()], [score_outer()],
+[summarize_outer_importance()], or a [nested_cv_coxnet()] result.}
 
 \item{top_n}{Optional integer restricting the plot to the top `top_n`
 predictors ranked by selection frequency and absolute median coefficient.}

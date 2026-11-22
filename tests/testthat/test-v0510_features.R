@@ -190,7 +190,7 @@ test_that("N2: templecbe.cox_ties option and quiet tie scope work correctly", {
     wflow <- workflows::workflow() |> workflows::add_model(spec)
     wflow_pinned <- apply_workflow_cox_ties(wflow)
     spec_pinned <- workflows::extract_spec_parsnip(wflow_pinned)
-    expect_equal(spec_pinned$engine_args$cox.ties, "breslow")
+    expect_equal(rlang::eval_tidy(spec_pinned$eng_args$cox.ties), "breslow")
   }
 })
 

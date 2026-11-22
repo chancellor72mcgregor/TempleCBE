@@ -780,6 +780,15 @@ workflow_call_args <- function(dots, option, fn) {
   c(args[names(args) %in% names(dots)], args[!names(args) %in% names(dots)])
 }
 
+# A workflow set whose glmnet Cox workflows have `cox.ties` pinned to
+# getOption("templecbe.cox_ties"); see apply_workflow_cox_ties().
+apply_set_cox_ties <- function(object) {
+  for (i in seq_len(nrow(object))) {
+    object$info[[i]]$workflow[[1]] <- apply_workflow_cox_ties(object$info[[i]]$workflow[[1]])
+  }
+  object
+}
+
 # One start/stop driver call for a workflow of a set. As in
 # workflowsets::workflow_map(), a workflow that errors does not stop the
 # others: its result is the error, which is never checkpointed.
@@ -852,7 +861,8 @@ workflow_map_checkpointed <- function(object,
     dots <- list(...)
     object$result <- lapply(seq_len(nrow(object)), function(i) {
       run <- function() run_start_stop_workflow(
-        fn, object$info[[i]]$workflow[[1]], workflow_call_args(dots, workflow_set_option(object, i), fn),
+        fn, apply_workflow_cox_ties(object$info[[i]]$workflow[[1]]),
+        workflow_call_args(dots, workflow_set_option(object, i), fn),
         object$wflow_id[i]
       )
       if (!is.null(seed)) with_local_seed(as.integer(seed) + i - 1L, run()) else run()
@@ -862,9 +872,9 @@ workflow_map_checkpointed <- function(object,
   if (is.null(checkpoint_dir)) {
     # `seed` and `verbose` are this function's own arguments, so they never
     # reach `...`: forward them, or workflow_map() draws a random seed.
-    wm_args <- list(object = object, fn = fn, verbose = verbose)
+    wm_args <- list(object = apply_set_cox_ties(object), fn = fn, verbose = verbose)
     if (!is.null(seed)) wm_args$seed <- seed
-    return(do.call(workflowsets::workflow_map, c(wm_args, list(...))))
+    return(with_quiet_cox_ties(do.call(workflowsets::workflow_map, c(wm_args, list(...)))))
   }
 
   if (!inherits(object, "workflow_set")) {
@@ -912,6 +922,9 @@ workflow_map_checkpointed <- function(object,
       dots = wflow_args[[i]],
       seed = seed
     )
+    # The default ties leave the fingerprint as before, so existing
+    # checkpoints stay valid; another `templecbe.cox_ties` changes it.
+    if (!identical(get_templecbe_cox_ties(), "breslow")) payload$cox_ties <- get_templecbe_cox_ties()
     paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
   }
   wflow_fps <- vapply(seq_len(n_wflow), wflow_fp, character(1))
@@ -920,7 +933,7 @@ workflow_map_checkpointed <- function(object,
   for (i in seq_len(n_wflow)) {
     w_id <- wflow_ids[i]
     w_dir <- file.path(checkpoint_dir, safe_ids[i])
-    w_spec <- object$info[[i]]$workflow[[1]]
+    w_spec <- apply_workflow_cox_ties(object$info[[i]]$workflow[[1]])
 
     if (!active_mask[i]) {
       # Try loading if exists, but only when its fingerprint still matches:
@@ -974,9 +987,9 @@ workflow_map_checkpointed <- function(object,
         }
         # Written once, below, and only when it did not fail.
         if (!dir.exists(w_dir)) dir.create(w_dir, recursive = TRUE, showWarnings = FALSE)
-        wm_args <- list(object = object[i, , drop = FALSE], fn = fn, verbose = verbose)
+        wm_args <- list(object = apply_set_cox_ties(object[i, , drop = FALSE]), fn = fn, verbose = verbose)
         if (!is.null(seed)) wm_args$seed <- seed
-        out_w <- do.call(workflowsets::workflow_map, c(wm_args, dots))
+        out_w <- with_quiet_cox_ties(do.call(workflowsets::workflow_map, c(wm_args, dots)))
         out_w$result[[1]]
       }
     }

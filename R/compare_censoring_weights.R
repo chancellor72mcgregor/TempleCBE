@@ -507,12 +507,18 @@ score_outer <- function(object,
 #' tibble with one row per term per model and fold. Suitable for plotting variable
 #' importance, coefficient paths, and term stability across outer folds.
 #'
-#' @param x A tibble returned by [score_outer()].
+#' @param x A tibble returned by [score_outer()], or a [nested_cv_coxnet()]
+#'   result (its `id`, `mixture`, `penalty` and `.coefs` become `outer_fold`,
+#'   `alpha`, `lambda` and `coefficients`, with `model = "coxnet"`).
 #' @return A long tibble containing `outer_fold` (if present), `model`, `alpha`,
 #'   `formula` (if present), `IBS`, `lambda`, `term`, and `estimate`.
-#' @seealso [score_outer()], [summarize_outer_importance()], [plot_outer_importance()]
+#' @seealso [score_outer()], [summarize_outer_importance()], [plot_outer_importance()],
+#'   [tidy_nested_cv_coxnet()]
 #' @export
 tidy_outer_coefficients <- function(x) {
+  if (is_nested_coxnet_result(x)) {
+    x <- nested_coxnet_as_outer(x)
+  }
   if (!is.data.frame(x)) {
     stop("`x` must be a data frame returned by score_outer().", call. = FALSE)
   }
@@ -547,7 +553,8 @@ unnest_outer_coefficients <- tidy_outer_coefficients
 #' [tidy_outer_coefficients()] or the nested tibble returned by [score_outer()].
 #'
 #' @param x A tibble returned by [tidy_outer_coefficients()] (with `term` and
-#'   `estimate` columns) or [score_outer()] (with a `coefficients` list column).
+#'   `estimate` columns), [score_outer()] (with a `coefficients` list column),
+#'   or a [nested_cv_coxnet()] result (with a `.coefs` list column).
 #' @param nonzero_only Logical (default `FALSE`). When `TRUE`, `median_estimate`,
 #'   `min_estimate`, `max_estimate`, and quantiles are computed over non-zero
 #'   estimates only (with `0` when never selected). When `FALSE`, they are
@@ -572,6 +579,9 @@ summarize_outer_importance <- function(x,
     stop("`x` must be a data frame from `tidy_outer_coefficients()` or `score_outer()`.", call. = FALSE)
   }
   total_models_override <- NULL
+  if (is_nested_coxnet_result(x)) {
+    x <- nested_coxnet_as_outer(x)
+  }
   if ("coefficients" %in% names(x) && !"term" %in% names(x)) {
     total_models_override <- nrow(x)
     x <- tidy_outer_coefficients(x)
@@ -666,8 +676,8 @@ summarize_outer_importance <- function(x,
 #' across outer resampling folds. Accepts output from [tidy_outer_coefficients()],
 #' [score_outer()], or [summarize_outer_importance()].
 #'
-#' @param x A tibble from [tidy_outer_coefficients()], [score_outer()], or
-#'   [summarize_outer_importance()].
+#' @param x A tibble from [tidy_outer_coefficients()], [score_outer()],
+#'   [summarize_outer_importance()], or a [nested_cv_coxnet()] result.
 #' @param top_n Optional integer restricting the plot to the top `top_n`
 #'   predictors ranked by selection frequency and absolute median coefficient.
 #' @param nonzero_only Logical (default `FALSE`). When `TRUE`, drops zero
@@ -700,7 +710,7 @@ plot_outer_importance <- function(x,
     sum_df$label <- resolve_cbe_labels(sum_df$term, label_map = label_map, style = style)
     raw_df <- NULL
   } else {
-    if ("coefficients" %in% names(x) && !"term" %in% names(x)) {
+    if (is_nested_coxnet_result(x) || ("coefficients" %in% names(x) && !"term" %in% names(x))) {
       raw_df <- tidy_outer_coefficients(x)
     } else {
       raw_df <- x

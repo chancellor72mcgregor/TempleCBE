@@ -152,10 +152,14 @@ check_row_vector <- function(x, truth, name, truth_name) {
 #' both fit start/stop data, and scoring uses their linear predictor. Other
 #' censored-regression models either refuse start/stop outcomes or treat each
 #' row as a subject. With the glmnet engine, candidates that differ only in
-#' `penalty` share one fit per resample, as glmnet fits the whole path.
+#' `penalty` share one fit per resample, as glmnet fits the whole path. Its
+#' `cox.ties` is set to `getOption("templecbe.cox_ties", "breslow")` unless
+#' the engine sets it, e.g. `set_engine("glmnet", cox.ties = "efron")`, which
+#' also silences glmnet 5.1's warning about the default tie handling.
 #'
 #' **Resamples.** Group them by subject, e.g. [rsample::group_vfold_cv()] with
-#' `group = subject_id`. If a subject is in both the analysis and the
+#' `group = subject_id`, or [subject_vfold_cv()], which also stratifies the
+#' folds by each subject's event status. If a subject is in both the analysis and the
 #' assessment set of a resample, these functions stop before fitting
 #' (`check_subject_overlap = FALSE` skips the check). Out-of-bag sets of
 #' [rsample::group_bootstraps()] pass.
@@ -290,6 +294,9 @@ tune_start_stop_impl <- function(object, resamples, subject_id, grid, metrics, e
   }
   check_true_false(check_subject_overlap, "check_subject_overlap")
   check_trunc(trunc)
+  # glmnet >= 5.1 warns on every Cox fit that does not set `cox.ties`; it is
+  # pinned to getOption("templecbe.cox_ties") unless the engine sets it.
+  object <- apply_workflow_cox_ties(object)
   model <- workflows::extract_spec_parsnip(object)
   if (!inherits(model, "proportional_hazards") || !model$engine %in% c("survival", "glmnet")) {
     stop(
@@ -358,7 +365,7 @@ tune_start_stop_impl <- function(object, resamples, subject_id, grid, metrics, e
       rows <- which(grid$.fit_group == g & active)
       first <- grid[rows[1], param_names, drop = FALSE]
       wf <- if (length(param_names)) tune::finalize_workflow(object, first) else object
-      fit <- tryCatch(generics::fit(wf, analysis), error = function(e) e)
+      fit <- tryCatch(with_quiet_cox_ties(generics::fit(wf, analysis)), error = function(e) e)
       if (inherits(fit, "error")) {
         notes <<- c(notes, paste0("fit failed for ", grid$.config[rows[1]], ": ", conditionMessage(fit)))
         return(NULL)
