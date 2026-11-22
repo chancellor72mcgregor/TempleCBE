@@ -252,3 +252,115 @@ test_that("workflow_map_checkpointed() works on multisession workers with unqual
   expect_false(is_failed_result(res2$result[[1]]))
   expect_gt(nrow(tune::collect_metrics(res2$result[[1]])), 0L)
 })
+
+# ------------------------------------------------------------------------------
+# The other parallel paths pass their worker packages to furrr. Run under a
+# sequential plan (no workers are started), which exercises the same calls.
+# ------------------------------------------------------------------------------
+
+test_that("joint_worker_packages() adds the bagged-tree and racing packages", {
+  skip_if_not_installed("future")
+  skip_if_not_installed("furrr")
+  local_ckpt_plan(future::multisession, workers = 2)
+  withr::local_options(templecbe.worker_session_packages = FALSE)
+  base <- joint_worker_packages("glmnet")
+  expect_true("survival" %in% base)
+  bag <- joint_worker_packages("baguette")
+  expect_identical(setdiff(bag, base), Filter(worker_package_installed, c("baguette", "rpart")))
+  race <- joint_worker_packages("glmnet", "race_anova")
+  expect_identical(setdiff(race, base), Filter(worker_package_installed, "finetune"))
+})
+
+test_that("cv_coxnet() and loco_mp_coxnet() run their parallel paths", {
+  skip_if_no_coxnet_deps()
+  skip_if_not_installed("furrr")
+  local_ckpt_plan(future::sequential)
+  d <- sim_counting()
+  f <- survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3
+  set.seed(2)
+  cv_par <- cv_coxnet(f, data = d, subject_id = "subject_id", v = 3, eval_time = c(3, 6),
+                      nlambda = 5, cox.ties = "breslow", parallel = TRUE)
+  expect_s3_class(cv_par, "cv_coxnet")
+  dir <- withr::local_tempdir("cv_coxnet_par_")
+  set.seed(2)
+  cv_ck <- cv_coxnet(f, data = d, subject_id = "subject_id", v = 3, eval_time = c(3, 6),
+                     nlambda = 5, cox.ties = "breslow", parallel = TRUE, checkpoint_dir = dir)
+  expect_s3_class(cv_ck, "cv_coxnet")
+  expect_gt(length(list.files(dir, pattern = "\\.rds$")), 0L)
+
+  set.seed(101)
+  df <- data.frame(time = stats::rexp(50, 0.1) + 0.1, status = stats::rbinom(50, 1, 0.65),
+                   x1 = stats::rnorm(50), x2 = stats::rnorm(50), x3 = stats::rnorm(50))
+  fit <- loco_mp_coxnet(survival::Surv(time, status) ~ x1 + x2 + x3, data = df, eval_time = c(2, 8),
+                        B = 10, n_ratio = 0.7, m_ratio = 0.5, seed = 42, parallel = TRUE)
+  expect_equal(nrow(fit$results), 3L)
+})
+
+test_that("cv_joint_model() and nested_cv_joint_model() run their parallel paths", {
+  for (pkg in c("glmnet", "survival", "rsample", "yardstick", "furrr")) skip_if_not_installed(pkg)
+  local_ckpt_plan(future::sequential)
+  set.seed(777)
+  df <- data.frame(time = stats::rexp(45, rate = 0.1) + 0.1, status = stats::rbinom(45, 1, 0.6),
+                   x1 = stats::rnorm(45), x2 = stats::rnorm(45))
+  f <- survival::Surv(time, status) ~ x1 + x2
+  expect_s3_class(cv_joint_model(df, f, v = 3, penalty = 0.05, parallel = TRUE), "cv_joint_model")
+  dir <- withr::local_tempdir("cv_joint_par_")
+  expect_s3_class(cv_joint_model(df, f, v = 3, penalty = 0.05, parallel = TRUE, checkpoint_dir = dir),
+                  "cv_joint_model")
+
+  folds <- rsample::nested_cv(df, outside = rsample::vfold_cv(v = 2), inside = rsample::vfold_cv(v = 2))
+  expect_s3_class(nested_cv_joint_model(folds, outcome = f, penalty = 0.05, parallel = TRUE),
+                  "nested_cv_joint_model")
+  dir2 <- withr::local_tempdir("nested_joint_par_")
+  expect_s3_class(nested_cv_joint_model(folds, outcome = f, penalty = 0.05, parallel = TRUE,
+                                        checkpoint_dir = dir2),
+                  "nested_cv_joint_model")
+})
+
+test_that("worker package helpers cover workflow sets, specs and their fallbacks", {
+  for (pkg in c("recipes", "parsnip", "workflows", "workflowsets")) skip_if_not_installed(pkg)
+  df <- data.frame(y = stats::rnorm(10), x = stats::rnorm(10))
+  spec <- parsnip::set_engine(parsnip::linear_reg(), "lm")
+  rec <- recipes::recipe(y ~ x, data = df)
+  wset <- workflowsets::workflow_set(preproc = list(rec = rec), models = list(lm = spec))
+  expect_true(all(c("parsnip", "recipes") %in% object_required_pkgs(wset)))
+  expect_true("parsnip" %in% object_required_pkgs(spec))
+  expect_identical(safe_required_pkgs(NULL), character())
+  expect_identical(safe_required_pkgs(1), character())
+  # a method that errors contributes nothing
+  bad <- structure(list(), class = c("model_spec", "broken_spec_for_test"))
+  expect_identical(safe_required_pkgs(bad), character())
+
+  expect_identical(drop_named(list(1, 2), "a"), list(1, 2))
+  expect_identical(drop_named(list(a = 1, b = 2), "a"), list(b = 2))
+  expect_match(failed_result_message(try(stop("kaput"), silent = TRUE)), "kaput")
+  expect_true(is.na(failed_result_message(list())))
+  empty_tune <- structure(tibble::tibble(id = character(), .metrics = list()),
+                          class = c("tune_results", "tbl_df", "tbl", "data.frame"))
+  expect_true(is_failed_result(empty_tune))
+})
+
+test_that("workflow_map_checkpointed() does not cache a workflow in which every model failed", {
+  for (pkg in c("rsample", "recipes", "parsnip", "tune", "workflows", "workflowsets", "yardstick")) {
+    skip_if_not_installed(pkg)
+  }
+  set.seed(3)
+  df <- data.frame(y = stats::rnorm(30), x = stats::rnorm(30))
+  bad_rec <- recipes::recipe(y ~ x, data = df) |>
+    recipes::step_mutate(x = stop("deliberate failure"))
+  wset <- workflowsets::workflow_set(preproc = list(bad = bad_rec),
+                                     models = list(lm = parsnip::set_engine(parsnip::linear_reg(), "lm")))
+  dir <- withr::local_tempdir("wmc_fail_")
+  warns <- character()
+  res <- withCallingHandlers(
+    suppressMessages(workflow_map_checkpointed(wset, fn = "fit_resamples",
+                                               resamples = rsample::vfold_cv(df, v = 2),
+                                               checkpoint_dir = dir)),
+    warning = function(w) {
+      warns <<- c(warns, conditionMessage(w))
+      invokeRestart("muffleWarning")
+    }
+  )
+  expect_true(any(grepl("every model of workflow 'bad_lm' failed", warns)))
+  expect_length(list.files(dir, pattern = "\\.rds$", recursive = TRUE), 0L)
+})
