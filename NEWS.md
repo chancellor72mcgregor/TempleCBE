@@ -1,4 +1,4 @@
-# TempleCBE (development version)
+# TempleCBE 0.12.0.9000 (development version)
 
 ## New features
 
