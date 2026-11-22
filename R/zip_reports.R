@@ -63,6 +63,14 @@
 #'   current DOCX files.
 #' @param docx_backend Conversion backend passed to \code{\link{convert_pdf_to_docx}}:
 #'   \code{"auto"} (default), \code{"python"}, \code{"libreoffice"}, or \code{"word_com"}.
+#' @param docx_timeout Optional \code{timeout} passed to \code{\link{convert_pdf_to_docx}}
+#'   (seconds, one number or one per backend). \code{NULL} (default) uses the
+#'   \code{templecbe.docx_timeout} option, else 600.
+#' @param docx_mtime_tolerance Seconds (default 0) by which a DOCX may be older
+#'   than its PDF and still count as current. A file system or sync tool that
+#'   rounds or shifts modification times (FAT/exFAT and some network drives
+#'   keep 2-second times; a sync can re-touch the PDF) can otherwise make a
+#'   DOCX converted from that very PDF look out of date.
 #' @return The path to the created zip file.
 #' @export
 #'
@@ -83,7 +91,15 @@ zip_reports <- function(reports,
                          output_dir = getwd(),
                          docx_from_pdf = NULL,
                          docx_strict = FALSE,
-                         docx_backend = "auto") {
+                         docx_backend = "auto",
+                         docx_timeout = NULL,
+                         docx_mtime_tolerance = 0) {
+  if (!is.numeric(docx_mtime_tolerance) || length(docx_mtime_tolerance) != 1L ||
+      is.na(docx_mtime_tolerance) || docx_mtime_tolerance < 0) {
+    stop("`docx_mtime_tolerance` must be a single non-negative number of seconds.", call. = FALSE)
+  }
+  if (!is.null(docx_timeout)) .backend_timeouts(docx_timeout)
+  docx_timeout <- docx_timeout %||% getOption("templecbe.docx_timeout", 600)
   if (!requireNamespace("openxlsx", quietly = TRUE)) {
     stop("Package 'openxlsx' is required by zip_reports(). Install it with install.packages(\"openxlsx\").", call. = FALSE)
   }
@@ -119,12 +135,12 @@ zip_reports <- function(reports,
 
   docx_converter <- if (!is.null(docx_from_pdf)) {
     if (identical(docx_from_pdf, convert_pdf_to_docx)) {
-      function(src, dest) convert_pdf_to_docx(src, dest, backend = docx_backend, strict = docx_strict)
+      function(src, dest) convert_pdf_to_docx(src, dest, backend = docx_backend, strict = docx_strict, timeout = docx_timeout)
     } else {
       docx_from_pdf
     }
   } else if (isTRUE(docx_strict) || !identical(docx_backend, "auto")) {
-    function(src, dest) convert_pdf_to_docx(src, dest, backend = docx_backend, strict = docx_strict)
+    function(src, dest) convert_pdf_to_docx(src, dest, backend = docx_backend, strict = docx_strict, timeout = docx_timeout)
   } else {
     NULL
   }
@@ -213,7 +229,8 @@ zip_reports <- function(reports,
         # leaves the old file where it was.
         docx_is_current <- function() {
           file.exists(output_path) &&
-            !(pdf_exists && file.info(output_path)$mtime < file.info(pdf_output_path)$mtime)
+            !(pdf_exists && as.numeric(file.info(output_path)$mtime) + docx_mtime_tolerance <
+                as.numeric(file.info(pdf_output_path)$mtime))
         }
         ship_docx <- docx_is_current()
 

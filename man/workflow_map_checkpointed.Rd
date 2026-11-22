@@ -21,7 +21,8 @@ workflow_map_checkpointed(
 
 \item{fn}{Function to apply to each workflow (default `"tune_grid"`).}
 
-\item{...}{Arguments passed to `fn`.}
+\item{...}{Arguments passed to `fn`, for every workflow (they override the
+workflow's own [workflowsets::option_add()] options of the same name).}
 
 \item{seed}{Optional integer seed (default `1L`) used to set a reproducible RNG seed per workflow.}
 
@@ -48,6 +49,15 @@ A `workflow_set` object with populated result columns.
 A resumable, fingerprinted wrapper around [workflowsets::workflow_map()] that
 checkpoints each workflow's tuning results independently into subdirectories
 of `checkpoint_dir`.
+}
+\details{
+Each workflow is run with its own options, as set with
+[workflowsets::option_add()] (`param_info`, `grid`, ...), combined with the
+arguments given in `...` the way [workflowsets::workflow_map()] combines
+them: an argument given in `...` replaces an option of the same name. The
+options are part of each workflow's fingerprint, so changing one recomputes
+that workflow only. For `fn = "fit_resamples"` the tuning-only options
+(`param_info`, `grid`, ...) are dropped, as in `workflow_map()`.
 }
 \seealso{
 [tune_grid_checkpointed()], [workflowsets::workflow_map()]

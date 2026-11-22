@@ -1475,8 +1475,9 @@ refresh_pipeline <- function(x) {
     return(lapply(x, refresh_pipeline))
   }
   if (is(x, "FilePath")) {
-    if (file.exists(x@path)) {
+    if (!is.na(x@path) && file.exists(x@path)) {
       x@mtime <- file.info(x@path)$mtime
+      x@file_ext <- tools::file_ext(x@path)
     } else {
       # A file deleted after the object was made keeps no timestamp: without
       # this the old mtime would keep saying the file is unchanged (see
@@ -3303,13 +3304,25 @@ list_stage_data_artifacts <- function(
 #'   reads it with [readRDS()], which can run code stored in the file: load only
 #'   files written by `save_pipeline()` in a location that you trust.
 #' @param update_mtime Logical. When loading, should the `@mtime` slots of all
-#'   contained files be re-read from disk? Defaults to `TRUE`.
+#'   contained files be re-read from disk? Defaults to `TRUE`. Every file is
+#'   re-read, including dependencies of dependencies.
+#' @param root For `save_pipeline()`: optional project root (such as
+#'   `here::here()`). Paths under it are stored relative to it, so the saved
+#'   pipeline can be loaded on another machine, or another drive, where the
+#'   project lives somewhere else (`S:/...` on Windows, `/home/...` on Linux).
+#'   For `load_pipeline()`: the root to resolve those relative paths against;
+#'   the default is `here::here()` on the machine that loads it.
+#' @param from For `load_pipeline()`: optional old project root(s) of a
+#'   pipeline saved with absolute paths (for example
+#'   `"S:/Clinical Science/Staff/project"`); paths under them are moved under
+#'   `root`. See [relocate_pipeline()].
 #' @return
 #'   `save_pipeline` returns `file` invisibly on success.
 #'   `load_pipeline` returns the list of pipeline objects with refreshed timestamps.
+#' @seealso [relocate_pipeline()], [relativize_pipeline()]
 #' @export
 #' @rdname pipeline_storage
-save_pipeline <- function(pipeline, file = "pipeline.rds") {
+save_pipeline <- function(pipeline, file = "pipeline.rds", root = NULL) {
   if (is(pipeline, "FilePath") || is(pipeline, "FileOutputs") || is(pipeline, "FileUses")) {
     pipeline <- list(pipeline)
   }
@@ -3323,47 +3336,153 @@ save_pipeline <- function(pipeline, file = "pipeline.rds") {
     templecbe_version = templecbe_version(),
     pipeline = pipeline
   )
+  if (!is.null(root)) {
+    root <- .check_pipeline_root(root)
+    payload$pipeline <- relativize_pipeline(pipeline, root = root)
+    payload$root <- root
+    payload$relative <- TRUE
+  }
   saveRDS(payload, file = file)
   invisible(file)
 }
 
 #' @export
 #' @rdname pipeline_storage
-load_pipeline <- function(file = "pipeline.rds", update_mtime = TRUE) {
+load_pipeline <- function(file = "pipeline.rds", update_mtime = TRUE, root = NULL, from = NULL) {
   if (!file.exists(file)) {
     stop("Pipeline file not found: ", file, call. = FALSE)
   }
   obj <- readRDS(file)
-  pipeline <- if (is.list(obj) && "pipeline" %in% names(obj)) obj$pipeline else obj
+  is_payload <- is.list(obj) && "pipeline" %in% names(obj)
+  pipeline <- if (is_payload) obj$pipeline else obj
+  if (is(pipeline, "FilePath")) pipeline <- list(pipeline)
 
   if (!is.list(pipeline)) {
     stop("Loaded object does not contain a valid pipeline list.", call. = FALSE)
   }
 
-  if (isTRUE(update_mtime)) {
-    refresh_file_mtime <- function(f) {
-      if (!is(f, "FilePath")) return(f)
-      if (file.exists(f@path)) {
-        f@mtime <- file.info(f@path)$mtime
-      } else {
-        f@mtime <- as.POSIXct(NA)
-      }
-      f
-    }
-    pipeline <- lapply(pipeline, function(node) {
-      if (is(node, "FilePath")) {
-        node <- refresh_file_mtime(node)
-      }
-      if (is(node, "FileUses") && length(node@dependencies) > 0) {
-        node@dependencies <- lapply(node@dependencies, refresh_file_mtime)
-      }
-      if (is(node, "FileOutputs") && length(node@output) > 0) {
-        node@output <- lapply(node@output, refresh_file_mtime)
-      }
-      node
-    })
+  saved_relative <- is_payload && isTRUE(obj$relative)
+  if (saved_relative || !is.null(from) || !is.null(root)) {
+    root <- .check_pipeline_root(root %||% here::here())
+    # Relocating refreshes the timestamps itself.
+    pipeline <- relocate_pipeline(pipeline, root = root, from = from, refresh = isTRUE(update_mtime))
+  } else if (isTRUE(update_mtime)) {
+    # Every file, however deep: the old loop re-read only the top level and
+    # its direct dependencies/outputs, so a dependency of a dependency kept the
+    # timestamp it had when the pipeline was saved.
+    pipeline <- refresh_pipeline(pipeline)
   }
 
   pipeline
+}
+
+#' @noRd
+.check_pipeline_root <- function(root) {
+  if (!is.character(root) || length(root) != 1L || is.na(root) || !nzchar(trimws(root))) {
+    stop("`root` must be a single non-empty directory path.", call. = FALSE)
+  }
+  sub("/+$", "", gsub("\\\\", "/", root))
+}
+
+# Is `path` absolute? (`/x`, `~/x`, a drive path `C:/x` or `C:\x`, or a UNC path `\\server\share`.)
+#' @noRd
+.is_absolute_path <- function(path) {
+  grepl("^(/|~|[A-Za-z]:[/\\\\]|\\\\\\\\)", path)
+}
+
+# `path` relative to `root` when it is under it, else NA. Separators are
+# compared as `/`; a Windows drive path, or any path on a case-insensitive
+# file system, is compared without case.
+#' @noRd
+.path_under <- function(path, root) {
+  p <- gsub("\\\\", "/", path)
+  r <- sub("/+$", "", gsub("\\\\", "/", root))
+  fold <- .case_insensitive_fs() || grepl("^[A-Za-z]:", r)
+  pp <- if (fold) tolower(p) else p
+  rr <- if (fold) tolower(r) else r
+  out <- rep(NA_character_, length(p))
+  same <- !is.na(pp) & pp == rr
+  out[same] <- "."
+  under <- !is.na(pp) & startsWith(pp, paste0(rr, "/"))
+  out[under] <- substring(p[under], nchar(r) + 2L)
+  out
+}
+
+# Apply `f` to the path of every pipeline object in `x`, however deep.
+#' @noRd
+.map_pipeline_paths <- function(x, f) {
+  if (is.null(x)) return(NULL)
+  if (is.list(x)) {
+    return(lapply(x, .map_pipeline_paths, f = f))
+  }
+  if (is(x, "FilePath")) {
+    if (!is.na(x@path)) x@path <- f(x@path)
+    if (is(x, "FileUses") && length(x@dependencies) > 0L) {
+      x@dependencies <- lapply(x@dependencies, .map_pipeline_paths, f = f)
+    }
+    if (is(x, "FileOutputs") && length(x@output) > 0L) {
+      x@output <- lapply(x@output, .map_pipeline_paths, f = f)
+    }
+  }
+  x
+}
+
+#' Portable Pipeline Paths: Relative to a Project Root, and Back
+#'
+#' A pipeline built with `here::here(...)` paths stores absolute, machine
+#' specific paths (`S:/Clinical Science/...` on Windows, `/home/...` on Linux),
+#' so a saved pipeline (an `all_file_objects.rds`) found none of its files on
+#' the other machine and had to be rebuilt. `relativize_pipeline()` rewrites
+#' every path under `root` relative to it; `relocate_pipeline()` puts relative
+#' paths back under `root` (and, with `from`, moves absolute paths from an old
+#' root to the new one), then refreshes the timestamps from disk, so
+#' [get_render_plan()] and [render_pipeline()] see the files on this machine.
+#' [save_pipeline()] and [load_pipeline()] do both when given `root`.
+#'
+#' Paths outside `root` are left as they are. Separators are compared as `/`,
+#' and a Windows drive path is matched without regard to case.
+#'
+#' @param x A pipeline object ([FilePath], [FileUses], [FileOutputs]) or a
+#'   list of them. Dependencies and outputs are rewritten too.
+#' @param root The project root; default `here::here()`.
+#' @param from Optional character vector of old project roots: absolute paths
+#'   under one of them are moved under `root`.
+#' @param refresh Re-read each file's modification time from disk afterwards
+#'   (default `TRUE`; see [refresh_pipeline()]).
+#' @return `x`, with rewritten paths.
+#' @seealso [save_pipeline()], [load_pipeline()], [refresh_pipeline()]
+#' @export
+#' @examples
+#' f <- FilePath("data", "S:/proj/data/raw.xlsx")
+#' rel <- relativize_pipeline(f, root = "S:/proj")
+#' rel@path
+#' relocate_pipeline(rel, root = "/home/me/proj", refresh = FALSE)@path
+#' relocate_pipeline(f, root = "/home/me/proj", from = "S:/proj", refresh = FALSE)@path
+relativize_pipeline <- function(x, root = here::here()) {
+  root <- .check_pipeline_root(root)
+  .map_pipeline_paths(x, function(p) {
+    rel <- .path_under(p, root)
+    if (is.na(rel)) p else rel
+  })
+}
+
+#' @rdname relativize_pipeline
+#' @export
+relocate_pipeline <- function(x, root = here::here(), from = NULL, refresh = TRUE) {
+  root <- .check_pipeline_root(root)
+  if (!is.null(from) && (!is.character(from) || anyNA(from) || any(!nzchar(trimws(from))))) {
+    stop("`from` must be a character vector of directory paths.", call. = FALSE)
+  }
+  from <- if (is.null(from)) character() else vapply(from, .check_pipeline_root, character(1), USE.NAMES = FALSE)
+  out <- .map_pipeline_paths(x, function(p) {
+    for (old in from) {
+      rel <- .path_under(p, old)
+      if (!is.na(rel)) {
+        return(if (identical(rel, ".")) root else paste0(root, "/", rel))
+      }
+    }
+    if (.is_absolute_path(p)) p else paste0(root, "/", sub("^\\./", "", gsub("\\\\", "/", p)))
+  })
+  if (isTRUE(refresh)) refresh_pipeline(out) else out
 }
 

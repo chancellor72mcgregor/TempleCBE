@@ -417,6 +417,8 @@ reference:
       - join_pipelines
       - dedupe_pipeline
       - refresh_pipeline
+      - relativize_pipeline
+      - relocate_pipeline
       - export_pipeline_diagram
       - graph_setops
       - graph_intersect
@@ -510,6 +512,7 @@ reference:
       - print.cbe_km
       - km_cutpoints
       - km_cutpoint_search
+      - surv_cutpoint_condmc
       - plot_cutpoint_bar
       - plot_cutpoint_scatter
       - plot_km_cutpoint

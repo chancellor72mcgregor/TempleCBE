@@ -12,7 +12,9 @@ zip_reports(
   output_dir = getwd(),
   docx_from_pdf = NULL,
   docx_strict = FALSE,
-  docx_backend = "auto"
+  docx_backend = "auto",
+  docx_timeout = NULL,
+  docx_mtime_tolerance = 0
 )
 }
 \arguments{
@@ -70,6 +72,16 @@ current DOCX files.}
 
 \item{docx_backend}{Conversion backend passed to \code{\link{convert_pdf_to_docx}}:
 \code{"auto"} (default), \code{"python"}, \code{"libreoffice"}, or \code{"word_com"}.}
+
+\item{docx_timeout}{Optional \code{timeout} passed to \code{\link{convert_pdf_to_docx}}
+(seconds, one number or one per backend). \code{NULL} (default) uses the
+\code{templecbe.docx_timeout} option, else 600.}
+
+\item{docx_mtime_tolerance}{Seconds (default 0) by which a DOCX may be older
+than its PDF and still count as current. A file system or sync tool that
+rounds or shifts modification times (FAT/exFAT and some network drives
+keep 2-second times; a sync can re-touch the PDF) can otherwise make a
+DOCX converted from that very PDF look out of date.}
 }
 \value{
 The path to the created zip file.
