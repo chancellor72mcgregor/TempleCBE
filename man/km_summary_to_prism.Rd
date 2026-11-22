@@ -15,12 +15,19 @@ km_summary_to_prism(
   drop_time0 = TRUE,
   validate_totals = TRUE,
   out_xlsx = NULL,
-  out_xlsx_paste = NULL
+  out_xlsx_paste = NULL,
+  out_csv = NULL
 )
 }
 \arguments{
 \item{x}{A data frame, or a path to an `.xlsx`, `.xls`, `.csv`, or `.txt`
-file, with one row per time per group.}
+file, with one row per time per group; or a fitted Kaplan-Meier curve
+(`survival::survfit()` or `ggsurvfit::survfit2()`), which is tabulated
+with `summary(x, censored = TRUE)`. A curve without strata (`~ 1`) is one
+group, named `"Overall"`; a curve stratified by one variable has its
+groups named by their values (`"Female"` rather than `"sex=Female"`), as
+[ggsurvfit::tidy_survfit()] names them. The column arguments are ignored
+for a curve.}
 
 \item{sheet}{Sheet name or index when `x` is an Excel file.}
 
@@ -41,6 +48,9 @@ events plus censored.}
 
 \item{out_xlsx_paste}{Optional path to write a copy with blanks instead of
 `NA`, convenient for pasting into Prism.}
+
+\item{out_csv}{Optional path to write the table as CSV, with blanks instead
+of `NA` (`na = ""`), which GraphPad Prism imports directly.}
 }
 \value{
 A data frame with column `X` and one integer column per group,
@@ -59,5 +69,7 @@ if (requireNamespace("survival", quietly = TRUE)) {
   km <- data.frame(time = s$time, strata = s$strata, n.risk = s$n.risk,
                    n.event = s$n.event, n.censor = s$n.censor)
   head(km_summary_to_prism(km))
+  # or straight from the fitted curve
+  head(km_summary_to_prism(fit))
 }
 }

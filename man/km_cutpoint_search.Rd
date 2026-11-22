@@ -12,7 +12,9 @@ km_cutpoint_search(
   min_prop = 0.1,
   n_cuts = 50,
   cutpoints = c("quantiles", "midpoints"),
-  alpha = c(0.1, 0.05, 0.001)
+  alpha = c(0.1, 0.05, 0.001),
+  pmethod = c("none", "condMC", "Lau92", "Lau94", "exactGauss", "HL", "min"),
+  B = 10000
 )
 }
 \arguments{
@@ -34,6 +36,14 @@ subject to `min_prop`).}
 
 \item{alpha}{Significance levels for the `first_p<alpha` criteria (default `c(0.1, 0.05, 0.001)`;
 `NULL` for none).}
+
+\item{pmethod}{How `maxstat::maxstat.test()` computes the p-value of the maximally selected
+statistic: `"none"` (default; no p-value, as in `survminer::surv_cutpoint()`), or one of
+`"condMC"` (conditional Monte Carlo, with `B` permutations), `"Lau92"`, `"Lau94"`,
+`"exactGauss"`, `"HL"` and `"min"`. Unlike the p-values of the other criteria, these correct
+for having searched over the cutpoints. Needs \pkg{maxstat}.}
+
+\item{B}{Number of Monte Carlo replications for `pmethod = "condMC"` (default 10000).}
 }
 \value{
 A list with class `"cbe_km_cutpoint"` containing:
@@ -44,6 +54,10 @@ A list with class `"cbe_km_cutpoint"` containing:
   \item{criteria}{A tibble with one row per selection criterion (see Selection criteria): `criterion`,
     the columns of `candidates`, and `neg_log10_p`}
   \item{cox_coef}{Coefficient of the continuous variable in a univariable Cox model}
+  \item{maxstat}{`NULL` without \pkg{maxstat}; otherwise a list with the maximally selected
+    log-rank `cutpoint`, its standardized `statistic`, the search-adjusted `p_value` (`NA` when
+    `pmethod = "none"`) and `pmethod`. With a `pmethod`, the `maxstat` row of `criteria` also
+    carries this adjusted p-value in `adjusted_p_value`.}
   \item{data}{The input data frame augmented with a \code{<var_col>_strata} binary factor column}
   \item{time_col}{Name of time column}
   \item{status_col}{Name of status column}

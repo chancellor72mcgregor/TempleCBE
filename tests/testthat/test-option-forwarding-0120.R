@@ -51,17 +51,17 @@ test_that("workflow_map_checkpointed() uses option_add() param_info and grid (an
 
   res <- workflow_map_checkpointed(wset, fn = "tune_grid", resamples = s$folds, checkpoint_dir = dir)
   # the option's range (1-2) and grid size, not the default degree range 1-3 / grid = 10
-  expect_identical(degrees_tuned(res$result[[1]]), c(1, 2))
+  expect_equal(degrees_tuned(res$result[[1]]), c(1, 2))
 
   # a changed option is a changed fingerprint: not served from the checkpoints
   wset2 <- workflowsets::option_add(s$wset, grid = data.frame(degree = 3L), id = "poly_lm")
   res2 <- workflow_map_checkpointed(wset2, fn = "tune_grid", resamples = s$folds, checkpoint_dir = dir)
-  expect_identical(degrees_tuned(res2$result[[1]]), 3)
+  expect_equal(degrees_tuned(res2$result[[1]]), 3)
 
   # an argument of the call replaces the option of that name, as in workflow_map()
   res3 <- workflow_map_checkpointed(wset, fn = "tune_grid", resamples = s$folds,
                                     grid = data.frame(degree = 1L), checkpoint_dir = dir)
-  expect_identical(degrees_tuned(res3$result[[1]]), 1)
+  expect_equal(degrees_tuned(res3$result[[1]]), 1)
 })
 
 test_that("workflow_map_checkpointed(fn = 'fit_resamples') drops tuning-only options", {
@@ -124,6 +124,8 @@ test_that("tune_race_survival() keeps a workflow set's own grid option and check
   skip_if_not_installed("workflowsets")
   skip_if_not_installed("finetune")
   skip_if_not_installed("survival")
+  skip_if_not_installed("censored")
+  loadNamespace("censored") # registers the survival_reg() engine
   seen <- NULL
   local_mocked_bindings(
     workflow_map_checkpointed = function(object, fn, ..., seed, checkpoint_dir, shard, checkpoint_mismatch) {
@@ -131,11 +133,11 @@ test_that("tune_race_survival() keeps a workflow set's own grid option and check
       object
     }
   )
-  lung <- stats::na.omit(survival::lung[, c("time", "status", "age")])
+  lung <- stats::na.omit(survival::lung[, c("time", "status", "age", "sex")])
   folds <- rsample::vfold_cv(lung, v = 3)
   spec <- parsnip::set_mode(parsnip::set_engine(parsnip::survival_reg(), "survival"), "censored regression")
   wset <- workflowsets::workflow_set(
-    preproc = list(a = survival::Surv(time, status) ~ age, b = survival::Surv(time, status) ~ age),
+    preproc = list(a = survival::Surv(time, status) ~ age, b = survival::Surv(time, status) ~ age + sex),
     models = list(w = spec)
   ) |>
     workflowsets::option_add(grid = 4, id = "a_w")

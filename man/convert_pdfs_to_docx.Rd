@@ -8,7 +8,7 @@ convert_pdfs_to_docx(
   conversions,
   backend = "auto",
   strict = TRUE,
-  timeout = 600
+  timeout = getOption("templecbe.docx_timeout", 600)
 )
 }
 \arguments{
@@ -25,10 +25,16 @@ available. Set \code{FALSE} to warn and skip instead; a skipped row comes
 back with \code{converted = FALSE}.}
 
 \item{timeout}{Seconds a converter may take on one file before it is
-stopped; it applies to every backend (python, LibreOffice and Word COM).
+stopped. A single number applies to every backend (python, LibreOffice
+and Word COM); a named vector such as \code{c(python = 120, libreoffice = 600)}
+sets each backend's own limit (a backend it does not name gets 600 s), so
+a heavy PDF can fail over from pdf2docx to LibreOffice sooner. The
+default is the \code{templecbe.docx_timeout} option, else 600, so
+\code{options(templecbe.docx_timeout = ...)} also reaches the conversions
+that [render_pipeline()] and [zip_reports()] make.
 A file that times out gets a warning that says so and comes back with
 \code{converted = FALSE} (the python backend then retries it once with
-LibreOffice, which gets its own \code{timeout}). Stopping a converter
+LibreOffice, under LibreOffice's own \code{timeout}). Stopping a converter
 stops the process that was started; any process that one started in turn
 (LibreOffice's \code{soffice.bin}, or the Word instance behind Word COM)
 may keep running and has to be closed by hand.}
