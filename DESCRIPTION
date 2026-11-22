@@ -68,6 +68,7 @@ Suggests:
     BradleyTerry2,
     broom.helpers,
     broom.mixed,
+    butcher (>= 0.3.0),
     callr,
     caret,
     censored (>= 0.3.0),

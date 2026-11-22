@@ -463,7 +463,11 @@ joint_status_time_predictions <- function(object, predictors) {
 #' @noRd
 joint_raw_predictors <- function(object) {
   comp <- object$components
-  comp$raw_predictors %||% comp$data[names(comp$blueprint$ptypes$predictors)]
+  out <- comp$raw_predictors %||% comp$data[names(comp$blueprint$ptypes$predictors)]
+  if (is.null(out)) {
+    stop("This model's training data was removed with `butcher::axe_data()`; pass `data`.", call. = FALSE)
+  }
+  out
 }
 
 #' Extract Survival Outcome Components and Predictors
@@ -566,6 +570,9 @@ predict.joint_model <- function(object, new_data = NULL, eval_time = NULL, type 
   rlang::check_dots_empty()
   if (is.null(new_data)) {
     new_data <- object$components$data
+    if (is.null(new_data)) {
+      stop("This model's training data was removed with `butcher::axe_data()`; pass `new_data`.", call. = FALSE)
+    }
   }
   eval_time <- eval_time %||% object$eval_time
   forged <- hardhat::forge(new_data, object$components$blueprint)

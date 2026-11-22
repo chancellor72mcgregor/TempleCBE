@@ -346,7 +346,7 @@ autoplot.cv_coxnet <- function(object, ...) {
 #' @rdname templecbe_methods
 #' @export
 print.cv_coxnet <- function(x, ...) {
-  folds <- nrow(x$resamples)
+  folds <- if (!is.null(x$resamples)) nrow(x$resamples) else length(unique(x$fold_metrics$id))
   cat("<cv_coxnet> penalized Cox model,", folds, "resamples\n")
   cat("  metric:", x$metric, paste0("(", x$direction, ")"),
       if (!is.na(x$metric_eval_time)) paste("at eval_time", format(x$metric_eval_time)) else "", "\n")

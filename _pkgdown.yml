@@ -153,6 +153,7 @@ reference:
       - tidy.coxnet_model
       - cv_coxnet
       - cv_coxnet-methods
+      - templecbe-butcher
       - nested_cv_coxnet
       - surv_subject_truth
       - validate_start_stop
