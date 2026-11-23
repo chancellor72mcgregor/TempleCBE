@@ -29,6 +29,21 @@ gtibs_recurrent <- function(n = 60, seed = 1, shape = 1.5, scale = 5) {
   }))
 }
 
+split_rows_midpoint <- function(long) {
+  # Split every row at its midpoint, covariates unchanged: the second half
+  # keeps the row's event status, the first half is censored at the split.
+  # The gaps (event to event) are unchanged; only the row layout changes.
+  mid <- (long$tstart + long$tstop) / 2
+  out <- do.call(rbind, lapply(seq_len(nrow(long)), function(i) {
+    r <- long[i, , drop = FALSE]
+    r1 <- r; r1$tstop <- mid[i]; r1$status <- 0L
+    r2 <- r; r2$tstart <- mid[i]
+    rbind(r1, r2)
+  }))
+  rownames(out) <- NULL
+  out
+}
+
 test_that("predict_gap_survival integrates the Breslow baseline over the gap window", {
   skip_if_no_coxnet_deps()
   bh <- list(time = c(1, 2, 4), cumhaz = matrix(c(0.1, 0.3, 0.5), ncol = 1))
@@ -238,4 +253,190 @@ test_that("nested_cv_coxnet gap mode scores outer gap IBS (A1)", {
   # The inner cross-validations scored IBS too.
   inner_ibs <- lapply(res$.inner, function(m) m[m$.metric == "brier_survival_integrated", ])
   expect_true(all(vapply(inner_ibs, nrow, integer(1)) > 0))
+})
+
+test_that("collapse_gap_truth groups rows event-to-event", {
+  skip_if_no_coxnet_deps()
+  long <- data.frame(
+    subject_id = c(1L, 1L, 1L, 2L, 3L, 3L),
+    tstart = c(0, 2, 5, 0, 0, 4),
+    tstop = c(2, 5, 9, 6, 4, 10),
+    status = c(0L, 1L, 0L, 0L, 1L, 0L)
+  )
+  y <- survival::Surv(long$tstart, long$tstop, long$status)
+  out <- collapse_gap_truth(surv_gap_truth(y, long$subject_id))
+  # Subject 1: rows [0,2] + [2,5] form the gap ending in the event at 5,
+  # then [5,9] is a censored gap. Subject 3 likewise splits at its event.
+  expect_equal(out$group, c(1L, 1L, 2L, 3L, 4L, 5L))
+  expect_equal(out$truth$.subject_id, c(1L, 1L, 2L, 3L, 3L))
+  expect_equal(out$truth$.gap, c(1L, 2L, 1L, 1L, 2L))
+  expect_equal(out$truth$.entry, c(0, 5, 0, 0, 4))
+  expect_equal(out$truth$.truth, survival::Surv(c(5, 4, 6, 4, 6), c(1, 0, 0, 1, 0)))
+  # One row per subject is already one gap per row.
+  one <- data.frame(
+    subject_id = c(1L, 2L), tstart = c(0, 0), tstop = c(3, 5), status = c(1L, 0L)
+  )
+  out1 <- collapse_gap_truth(
+    surv_gap_truth(survival::Surv(one$tstart, one$tstop, one$status), one$subject_id)
+  )
+  expect_equal(out1$group, c(1L, 2L))
+  expect_equal(out1$truth$.truth, survival::Surv(c(3, 5), c(1, 0)))
+  # The default grid is computed from whole-gap event times, so splitting
+  # rows does not move it.
+  expect_equal(
+    default_gap_eval_time(surv_gap_truth(y, long$subject_id)),
+    default_gap_eval_time(surv_gap_truth(
+      survival::Surv(split_rows_midpoint(long)$tstart, split_rows_midpoint(long)$tstop,
+                     split_rows_midpoint(long)$status),
+      split_rows_midpoint(long)$subject_id
+    ))
+  )
+})
+
+test_that("predict_gap_survival integrates piecewise over a gap's rows", {
+  skip_if_no_coxnet_deps()
+  bh <- list(time = c(1, 2, 4, 6), cumhaz = matrix(c(0.1, 0.3, 0.5, 0.9), ncol = 1))
+  # Gap 1: entry 0, rows [0,2] with eta 0 and [2,5] with eta log 2.
+  # Gap 2: entry 1, one row [1,4] with eta 0.
+  entry <- c(0, 1)
+  lp <- matrix(c(0, log(2), 0), nrow = 3, ncol = 1)
+  s <- predict_gap_survival(
+    bh, entry, lp, eval_time = c(0, 1, 2, 3, 5, 7),
+    start = c(0, 2, 1), stop = c(2, 5, 4), group = c(1L, 1L, 2L)
+  )
+  # Gap 1: u = 1 accrues H0(1) - H0(0) = 0.1 on the first row only (the
+  # second row starts after s + u, so it contributes nothing); u = 5 accrues
+  # 0.3 on the first row and (H0(5) - H0(2)) * 2 = 0.4 on the second; u = 7
+  # carries the second row's covariates past its stop, (H0(7) - H0(2)) * 2.
+  # Gap 2 is the one-row case: S(u) = exp(-[H0(1 + u) - H0(1)]).
+  expect_equal(unname(s[, , 1]), rbind(
+    c(1, exp(-0.1), exp(-0.3), exp(-0.3), exp(-0.7), exp(-1.5)),
+    c(1, exp(-0.2), exp(-0.2), exp(-0.4), exp(-0.8), exp(-0.8))
+  ))
+  # Doubling the hazard (lp = log 2 everywhere) squares the survival.
+  lp2 <- matrix(c(log(2), 2 * log(2), log(2)), nrow = 3, ncol = 1)
+  s2 <- predict_gap_survival(
+    bh, entry, lp2, eval_time = c(1, 5),
+    start = c(0, 2, 1), stop = c(2, 5, 4), group = c(1L, 1L, 2L)
+  )
+  expect_equal(unname(s2[, , 1]), unname(s[, c(2, 5), 1])^2)
+  # With one row per gap the piecewise path is identical to the plain path.
+  plain <- predict_gap_survival(bh, c(0, 1), matrix(0, nrow = 2, ncol = 1), c(1, 5))
+  split_path <- predict_gap_survival(
+    bh, c(0, 1), matrix(0, nrow = 2, ncol = 1), c(1, 5),
+    start = c(0, 1), stop = c(4, 4), group = c(1L, 2L)
+  )
+  expect_equal(unname(split_path), unname(plain))
+  # With no training events the baseline is 0 and every gap survives.
+  bh0 <- list(time = numeric(0), cumhaz = matrix(0, 0, 1))
+  expect_true(all(predict_gap_survival(
+    bh0, entry, lp, c(1, 2),
+    start = c(0, 2, 1), stop = c(2, 5, 4), group = c(1L, 1L, 2L)
+  ) == 1))
+})
+
+# Fixed-fit helper for the split-invariance tests below: one glmnet fit on
+# the training subjects, scored on a test set with one fixed penalty, so the
+# only difference between the runs is the row layout of the test data.
+gtibs_split_setup <- function() {
+  long <- gtibs_recurrent(n = 300, seed = 7)
+  train <- long[long$subject_id <= 200, ]
+  test <- long[long$subject_id > 200, ]
+  x_train <- as.matrix(train[, c("x1", "x2")])
+  y_train <- survival::Surv(train$tstart, train$tstop, train$status)
+  fit <- glmnet::glmnet(x_train, y_train, family = "cox", alpha = 1, cox.ties = "breslow")
+  list(
+    long = long, train = train, test = test,
+    x_train = x_train, y_train = y_train, fit = fit,
+    penalty = fit$lambda[5], eval_time = c(1, 2, 3, 4),
+    metrics = yardstick::metric_set(
+      yardstick::brier_survival_integrated, yardstick::brier_survival
+    )
+  )
+}
+
+gtibs_score_gap_brier <- function(setup, data) {
+  info <- surv_metric_info(setup$metrics)
+  score_gap_brier_path(
+    setup$fit, setup$x_train, setup$y_train, setup$train$subject_id,
+    as.matrix(data[, c("x1", "x2")]),
+    survival::Surv(data$tstart, data$tstop, data$status), data$subject_id,
+    penalty = setup$penalty, eval_time = setup$eval_time,
+    metrics = setup$metrics, info = info, trunc = 0.05
+  )
+}
+
+test_that("gap Brier is invariant to splitting rows at midpoints (reviewer finding 1)", {
+  skip_if_no_coxnet_deps()
+  setup <- gtibs_split_setup()
+  scored <- gtibs_score_gap_brier(setup, setup$test)
+  scored_split <- gtibs_score_gap_brier(setup, split_rows_midpoint(setup$test))
+  expect_equal(nrow(scored_split), nrow(scored))
+  expect_equal(scored_split$.estimate, scored$.estimate, tolerance = 1e-8)
+  # The per-row concordance definition is unchanged: surv_gap_truth() still
+  # returns one row per interval, so the split data has twice as many gaps
+  # for concordance.
+  expect_equal(
+    nrow(surv_gap_truth(
+      survival::Surv(setup$test$tstart, setup$test$tstop, setup$test$status),
+      setup$test$subject_id
+    )),
+    nrow(setup$test)
+  )
+  expect_equal(
+    nrow(surv_gap_truth(
+      survival::Surv(split_rows_midpoint(setup$test)$tstart,
+                     split_rows_midpoint(setup$test)$tstop,
+                     split_rows_midpoint(setup$test)$status),
+      split_rows_midpoint(setup$test)$subject_id
+    )),
+    2 * nrow(setup$test)
+  )
+})
+
+test_that("cv_coxnet gap IBS is unchanged when rows are split at midpoints (reviewer finding 1)", {
+  skip_if_no_coxnet_deps()
+  # The reviewer's demo: the PR's simulated data (n = 300, seed 7), same data
+  # with every row split at its midpoint and covariates unchanged. On the
+  # unfixed branch the best IBS fell from 0.135 to 0.101 (fixed-penalty
+  # reproduction; the reviewer saw 0.169 to 0.101).
+  long <- gtibs_recurrent(n = 300, seed = 7)
+  metrics <- yardstick::metric_set(
+    yardstick::brier_survival_integrated, yardstick::concordance_survival
+  )
+  run <- function(data) {
+    cv_coxnet(
+      survival::Surv(tstart, tstop, status) ~ x1 + x2,
+      data = data, subject_id = "subject_id", mixture = 1, v = 3, nlambda = 10,
+      recurrent = "gap", metrics = metrics,
+      eval_time = c(1, 2, 3, 4), cox.ties = "breslow", seed = 1
+    )
+  }
+  cv1 <- run(long)
+  cv2 <- run(split_rows_midpoint(long))
+  # Fixed folds (seed) and fixed eval_time. Each run uses its own default
+  # penalty path, not a shared one: glmnet's Cox objective divides the
+  # log-likelihood by the number of rows, so a shared penalty shrinks the
+  # split fit (twice the rows) about twice as hard and the two runs fit
+  # different models -- with a shared path the best IBS still differs by
+  # ~0.005 after the fix, from the fits, not the scoring. The shared-penalty
+  # case is covered exactly by the score-level test above, with one fixed
+  # fit: there the split IBS is bit-identical.
+  expect_equal(cv2$best$mean, cv1$best$mean, tolerance = 1e-6)
+  mean_ibs <- function(cv) {
+    mean(cv$fold_metrics$.estimate[cv$fold_metrics$.metric == "brier_survival_integrated"])
+  }
+  expect_equal(mean_ibs(cv2), mean_ibs(cv1), tolerance = 1e-4)
+})
+
+test_that("gap Brier handles a covariate that changes mid-gap (finding 1)", {
+  skip_if_no_coxnet_deps()
+  setup <- gtibs_split_setup()
+  split <- split_rows_midpoint(setup$test)
+  # Second half of every split row: the covariate changes mid-gap.
+  second_half <- seq(2, nrow(split), by = 2)
+  split$x1[second_half] <- split$x1[second_half] + 1
+  scored <- gtibs_score_gap_brier(setup, split)
+  expect_true(all(is.finite(scored$.estimate)))
+  expect_true(all(scored$.estimate >= 0 & scored$.estimate <= 1))
 })

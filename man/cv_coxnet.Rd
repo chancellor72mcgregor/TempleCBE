@@ -298,13 +298,21 @@ gap-time survival under the fitted Andersen-Gill model -- the Breslow
 baseline hazard integrated over the gap's own window, times the gap's
 linear predictor -- with gap-level inverse-probability-of-censoring
 weights that condition on the gap's entry time (see [predict_gap_survival()]
-and [gap_graf_weights()]). The censoring distribution `G` is the reverse
+and [gap_graf_weights()]). Gaps are event-to-event: a subject's rows up to
+and including an event form one gap, and the baseline hazard is integrated
+piecewise over the gap's rows, so splitting a gap's rows does not change
+the score. The censoring distribution `G` is the reverse
 Kaplan-Meier on the training subjects' full follow-up -- each subject's
 last interval ([surv_subject_truth()] with `recurrent = "last"`), so a
 subject's censoring time counts whenever follow-up ends in censoring,
 not only when it ends at the first event. The Brier score is integrated over `eval_time`
 the way [yardstick::brier_survival_integrated()] integrates it, and
 averaged over gaps, so like concordance it describes gaps, not subjects.
+A gap entering late can run past the last training event time, where the
+Breslow baseline is flat, so its predicted survival is too high over the
+rest of the window; the effect is bounded by the 90th-percentile default
+`eval_time` and the capped censoring weights, and the simulation shows no
+bias.
 Gap mode defaults to concordance only; pass `metrics` to add the Brier
 scores, and `roc_auc_survival` is not available there.
 

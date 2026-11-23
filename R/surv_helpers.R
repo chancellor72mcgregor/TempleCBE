@@ -272,6 +272,55 @@ surv_gap_truth <- function(truth, subject_id = NULL) {
   )
 }
 
+#' Collapse Per-Row Gap Truth to Event-to-Event Gaps
+#'
+#' Groups a subject's consecutive rows up to and including an event into one
+#' gap, so a gap split across rows by a time-varying covariate is scored as
+#' the one gap it is, not as several gaps ending in fake censoring. Only the
+#' subject's last row ends in real censoring, so only the last gap of a
+#' subject can be censored. Used only on the gap-time Brier path
+#' ([score_gap_brier_path()]); gap-time concordance keeps the per-row truth
+#' ([surv_gap_truth()]).
+#'
+#' @param gap_truth Output of [surv_gap_truth()], one row per interval, in
+#'   its row order (sorted by subject, start, stop).
+#' @return A list with `truth`, a tibble like `gap_truth` but one row per gap
+#'   (`.subject_id`, `.gap` the 1-based gap number within the subject,
+#'   `.entry` the calendar start of the gap, `.truth` a right-censored `Surv`
+#'   of the whole gap time -- last row stop minus gap entry -- and the status
+#'   of the gap's last row), and `group`, an integer vector with one element
+#'   per row of `gap_truth` giving the collapsed gap each row belongs to.
+#' @keywords internal
+#' @noRd
+collapse_gap_truth <- function(gap_truth) {
+  if (!is.data.frame(gap_truth) ||
+      !all(c(".subject_id", ".gap", ".entry", ".truth") %in% names(gap_truth))) {
+    stop("`gap_truth` must be the output of surv_gap_truth().", call. = FALSE)
+  }
+  n <- nrow(gap_truth)
+  if (!n) {
+    return(list(truth = gap_truth, group = integer(0)))
+  }
+  parts <- surv_components(gap_truth$.truth)
+  sid <- gap_truth$.subject_id
+  # A new gap starts at a subject's first row and at every row after an event.
+  new_gap <- c(TRUE, sid[-1] != sid[-n] | parts$status[-n] == 1)
+  group <- cumsum(new_gap)
+  first <- !duplicated(group)
+  last <- !duplicated(group, fromLast = TRUE)
+  entry_first <- gap_truth$.entry[first]
+  stop_last <- (gap_truth$.entry + parts$stop)[last]
+  sid_first <- sid[first]
+  gap_no <- sequence(rle(as.character(sid_first))$lengths)
+  truth <- tibble::tibble(
+    .subject_id = sid_first,
+    .gap = as.integer(gap_no),
+    .entry = entry_first,
+    .truth = survival::Surv(stop_last - entry_first, parts$status[last])
+  )
+  list(truth = truth, group = as.integer(group))
+}
+
 #' Gap-Time Concordance From Per-Gap Linear Predictors
 #'
 #' Harrell's concordance between gap times and per-gap risk: a gap is scored
@@ -313,27 +362,78 @@ gap_time_concordance <- function(gap_truth, lp) {
 #' time than the same covariates starting at time 0. Each gap is scored by its
 #' own interval's linear predictor, regardless of `covariates`.
 #'
+#' With `group`, `start` and `stop` a gap may span several rows -- a gap split
+#' by a time-varying covariate -- and the baseline is integrated piecewise
+#' over its rows: `exp(-sum_k [H0(min(s + u, e_k)) - H0(max(s, s_k))] *
+#' exp(eta_k))`, where `(s_k, e_k]` is row `k`'s interval. A row's covariates
+#' are carried forward past the gap's last row, as in
+#' [predict_subject_survival()], so with one row per gap this is identical to
+#' the single-interval formula above. Rows starting after `s + u` contribute
+#' nothing. A gap entering late can run past the last training event time,
+#' where the Breslow baseline is flat, so its predicted survival is too high
+#' over the rest of the window; the effect is bounded by the 90th-percentile
+#' default evaluation time and the capped censoring weights.
+#'
 #' @param bh Output of [breslow_cumhaz()] on the training data.
 #' @param entry Numeric vector of gap entry (calendar start) times, one per
 #'   gap, in the same row order as `lp`.
-#' @param lp Numeric matrix of per-gap linear predictors (rows by penalties).
+#' @param lp Numeric matrix of per-gap linear predictors (rows by penalties);
+#'   with `group`, one row per component row, in the same order as `start`,
+#'   `stop` and `group`.
 #' @param eval_time Gap-time evaluation times.
+#' @param start,stop Numeric vectors of the component rows' calendar start
+#'   and stop times, one per row of `lp`. Only used with `group`.
+#' @param group Integer vector, one per row of `lp`, giving the gap each
+#'   component row belongs to (values in `1:length(entry)`, covering every
+#'   gap, in gap order). `NULL` (default) is one row per gap.
 #' @return An array of gaps by evaluation times by penalties with the
 #'   predicted conditional gap-time survival.
 #' @keywords internal
 #' @noRd
-predict_gap_survival <- function(bh, entry, lp, eval_time) {
+predict_gap_survival <- function(bh, entry, lp, eval_time, start = NULL, stop = NULL, group = NULL) {
   lp <- as.matrix(lp)
   n_gaps <- length(entry)
   n_times <- length(eval_time)
   surv <- array(NA_real_, c(n_gaps, n_times, ncol(lp)))
-  h0_entry <- cumhaz_at(bh, entry)
-  for (l in seq_len(ncol(lp))) {
-    h0_plus <- matrix(
-      cumhaz_at(bh, as.vector(outer(entry, eval_time, "+")))[, l],
-      nrow = n_gaps, ncol = n_times
+  if (is.null(group)) {
+    # One row per gap: the cumulative hazard is computed once, not once per
+    # penalty, and indexed by column inside the loop.
+    h0_entry <- cumhaz_at(bh, entry)
+    h0_plus <- cumhaz_at(bh, as.vector(outer(entry, eval_time, "+")))
+    for (l in seq_len(ncol(lp))) {
+      h_plus <- matrix(h0_plus[, l], nrow = n_gaps, ncol = n_times)
+      surv[, , l] <- exp(-(h_plus - h0_entry[, l]) * exp(lp[, l]))
+    }
+    return(surv)
+  }
+  n_rows <- nrow(lp)
+  if (length(start) != n_rows || length(stop) != n_rows || length(group) != n_rows) {
+    stop("`start`, `stop` and `group` must have one value per row of `lp`.", call. = FALSE)
+  }
+  if (anyNA(group) || any(group < 1 | group > n_gaps) ||
+      !identical(as.integer(sort(unique(group))), seq_len(n_gaps))) {
+    stop(
+      "`group` must give the gap of each row of `lp`, from 1 to `length(entry)`, ",
+      "covering every gap.",
+      call. = FALSE
     )
-    surv[, , l] <- exp(-(h0_plus - h0_entry[, l]) * exp(lp[, l]))
+  }
+  # The last component row of a gap carries its covariates forward past its
+  # stop, as predict_subject_survival() does for subjects; otherwise a gap
+  # scored past its last row would stop accumulating hazard there.
+  is_last <- !duplicated(group, fromLast = TRUE)
+  stop_eff <- ifelse(is_last, Inf, stop)
+  h0_lower <- cumhaz_at(bh, pmax(entry[group], start))
+  upper <- pmin(
+    outer(entry[group], eval_time, "+"),
+    matrix(stop_eff, nrow = n_rows, ncol = n_times)
+  )
+  h0_upper <- cumhaz_at(bh, as.vector(upper))
+  grp <- factor(group, levels = sort(unique(group)))
+  for (l in seq_len(ncol(lp))) {
+    h_up <- matrix(h0_upper[, l], nrow = n_rows, ncol = n_times)
+    increments <- pmax(h_up - h0_lower[, l], 0) * exp(lp[, l])
+    surv[, , l] <- exp(-rowsum(increments, grp, reorder = FALSE))
   }
   surv
 }

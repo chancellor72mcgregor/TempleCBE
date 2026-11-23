@@ -56,13 +56,21 @@
 #' baseline hazard integrated over the gap's own window, times the gap's
 #' linear predictor -- with gap-level inverse-probability-of-censoring
 #' weights that condition on the gap's entry time (see [predict_gap_survival()]
-#' and [gap_graf_weights()]). The censoring distribution `G` is the reverse
+#' and [gap_graf_weights()]). Gaps are event-to-event: a subject's rows up to
+#' and including an event form one gap, and the baseline hazard is integrated
+#' piecewise over the gap's rows, so splitting a gap's rows does not change
+#' the score. The censoring distribution `G` is the reverse
 #' Kaplan-Meier on the training subjects' full follow-up -- each subject's
 #' last interval ([surv_subject_truth()] with `recurrent = "last"`), so a
 #' subject's censoring time counts whenever follow-up ends in censoring,
 #' not only when it ends at the first event. The Brier score is integrated over `eval_time`
 #' the way [yardstick::brier_survival_integrated()] integrates it, and
 #' averaged over gaps, so like concordance it describes gaps, not subjects.
+#' A gap entering late can run past the last training event time, where the
+#' Breslow baseline is flat, so its predicted survival is too high over the
+#' rest of the window; the effect is bounded by the 90th-percentile default
+#' `eval_time` and the capped censoring weights, and the simulation shows no
+#' bias.
 #' Gap mode defaults to concordance only; pass `metrics` to add the Brier
 #' scores, and `roc_auc_survival` is not available there.
 #'
@@ -849,16 +857,18 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
 
 #' Default Evaluation Times From Gap Event Times
 #'
-#' Deciles of the observed gap event times; a single distinct event time is
-#' enough, where the subject-level default needs two. Gap mode scores
-#' concordance, not survival curves, so these times only feed the refit
-#' model's predictions.
+#' Deciles of the observed whole-gap event times: gaps are event-to-event, so
+#' splitting a gap's rows does not change the grid. With Brier metrics these
+#' are the gap times the score is integrated over; with concordance only they
+#' feed the refit model's predictions, not the scoring. A single distinct
+#' event time is enough, where the subject-level default needs two.
 #'
 #' @param gap_truth Output of [surv_gap_truth()].
 #' @keywords internal
 #' @noRd
 default_gap_eval_time <- function(gap_truth) {
-  gap_event_times <- unname(gap_truth$.truth[gap_truth$.truth[, "status"] == 1, "time"])
+  collapsed <- collapse_gap_truth(gap_truth)$truth
+  gap_event_times <- unname(collapsed$.truth[collapsed$.truth[, "status"] == 1, "time"])
   if (!length(gap_event_times)) {
     stop("No gap events to choose default evaluation times from; pass `eval_time`.", call. = FALSE)
   }
@@ -913,7 +923,12 @@ score_gap_path <- function(fit, x_new, y_new, subject_new, penalty) {
 #' gap-time survival ([predict_gap_survival()]) with gap-level IPCW weights
 #' ([gap_graf_weights()]), and the Brier metrics are computed by yardstick on
 #' one row per gap. The baseline hazard and the censoring distribution come
-#' from the training data, as in [score_coxnet_path()].
+#' from the training data, as in [score_coxnet_path()]. Gaps are event-to-event
+#' ([collapse_gap_truth()]): a subject's rows up to and including an event form
+#' one gap, so a gap split across rows by a time-varying covariate is scored
+#' once, with its survival integrated piecewise over its rows -- never as
+#' several gaps ending in fake censoring. Concordance keeps the per-row
+#' definition ([score_gap_path()]).
 #'
 #' @return A tibble with `penalty`, `.metric`, `.estimator`, `.eval_time`
 #'   and `.estimate`, one row per penalty per Brier metric (per evaluation
@@ -932,9 +947,13 @@ score_gap_brier_path <- function(fit, x_train, y_train, subject_train, x_new, y_
   parts <- surv_components(y_new)
   ord <- order(subject_new, parts$start, parts$stop)
   lp <- coxnet_link(fit, x_new, penalty)[ord, , drop = FALSE]
-  surv <- predict_gap_survival(bh, gap_truth$.entry, lp, eval_time)
-  weights <- gap_graf_weights(gap_truth, eval_time, censoring, trunc)
-  frame <- surv_metric_frame(gap_truth$.truth, surv, eval_time, weights, penalty)
+  collapsed <- collapse_gap_truth(gap_truth)
+  surv <- predict_gap_survival(
+    bh, collapsed$truth$.entry, lp, eval_time,
+    start = parts$start[ord], stop = parts$stop[ord], group = collapsed$group
+  )
+  weights <- gap_graf_weights(collapsed$truth, eval_time, censoring, trunc)
+  frame <- surv_metric_frame(collapsed$truth$.truth, surv, eval_time, weights, penalty)
   compute_surv_metrics(frame, metrics, info)
 }
 
