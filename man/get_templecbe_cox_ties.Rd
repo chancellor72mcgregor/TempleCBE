@@ -20,6 +20,7 @@ pinned Cox tie handling.}
 }
 \value{
 * `get_templecbe_cox_ties()` returns the active tie-handling string (`"breslow"` or `"efron"`).
+  An option value other than those two is an error naming the option.
 * `with_quiet_cox_ties()` returns the result of evaluating `expr`.
 * `apply_workflow_cox_ties()` returns the modified `workflow` or `model_spec`.
 }

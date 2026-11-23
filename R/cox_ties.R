@@ -14,13 +14,22 @@
 #'   pinned Cox tie handling.
 #' @return
 #' * `get_templecbe_cox_ties()` returns the active tie-handling string (`"breslow"` or `"efron"`).
+#'   An option value other than those two is an error naming the option.
 #' * `with_quiet_cox_ties()` returns the result of evaluating `expr`.
 #' * `apply_workflow_cox_ties()` returns the modified `workflow` or `model_spec`.
 #' @export
 #' @examples
 #' get_templecbe_cox_ties()
 get_templecbe_cox_ties <- function() {
-  getOption("templecbe.cox_ties", "breslow")
+  ties <- getOption("templecbe.cox_ties", "breslow")
+  if (length(ties) != 1L || !is.character(ties) || is.na(ties) || !ties %in% c("breslow", "efron")) {
+    stop(
+      "Option 'templecbe.cox_ties' must be \"breslow\" or \"efron\", not ",
+      paste(deparse(ties), collapse = ""), ".",
+      call. = FALSE
+    )
+  }
+  ties
 }
 
 #' @rdname get_templecbe_cox_ties

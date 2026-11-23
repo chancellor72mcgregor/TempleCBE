@@ -16,7 +16,7 @@ test_that("nested_cv_coxnet tunes on inner resamples, refits, and scores each ou
   )
   expect_s3_class(res, "nested_cv_coxnet")
   expect_equal(nrow(res), 2)
-  expect_named(res, c("id", "mixture", "penalty", ".metrics", ".coefs", ".inner"))
+  expect_named(res, c("id", "mixture", "penalty", ".metrics", ".coefs", ".fits", ".inner"))
   expect_true(all(res$mixture %in% c(0.5, 1)))
   expect_setequal(res$.metrics[[1]]$.metric, c("brier_survival_integrated", "concordance_survival"))
   expect_equal(res$.coefs[[1]]$term, c("x1", "x2", "x3"))

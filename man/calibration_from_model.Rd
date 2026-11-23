@@ -16,7 +16,9 @@ calibration_from_model(
 }
 \arguments{
 \item{object}{A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
-`cox_time_varying` or `fine_gray_model` object.}
+`cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object. For a
+`nested_cv_coxnet` result the risk is one minus the mean of the outer
+splits' predicted survival at `horizon` (see [predict_event_risk()]).}
 
 \item{new_data}{A data frame with the predictors and the `time_col` /
 `event_col` outcome columns. For a `fine_gray_model` fit, `event_col`
@@ -31,7 +33,7 @@ codes).}
 to.}
 
 \item{penalty}{Passed to [predict_event_risk()]; ignored for `joint_model`,
-`cox_time_varying` and `fine_gray_model`.}
+`cox_time_varying`, `fine_gray_model` and `nested_cv_coxnet`.}
 
 \item{...}{Passed to [calibration_table()] (for example `bins` or
 `conf_level`).}
@@ -43,7 +45,8 @@ As [calibration_table()]: a tibble with one row per model and bin,
 }
 \description{
 Validates a fitted [coxnet()], [cv_coxnet()], [joint_model()],
-[cox_time_varying()] or [fine_gray()] model at one horizon: the event risk
+[cox_time_varying()], [fine_gray()] or [nested_cv_coxnet()] model at one
+horizon: the event risk
 is predicted with [predict_event_risk()] and passed, with the
 right-censored outcome from `new_data`, to [calibration_table()]. See there
 for the bins, the observed risks and the metrics; competing events are

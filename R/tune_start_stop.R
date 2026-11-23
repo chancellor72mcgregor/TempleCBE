@@ -155,7 +155,13 @@ check_row_vector <- function(x, truth, name, truth_name) {
 #' `penalty` share one fit per resample, as glmnet fits the whole path. Its
 #' `cox.ties` is set to `getOption("templecbe.cox_ties", "breslow")` unless
 #' the engine sets it, e.g. `set_engine("glmnet", cox.ties = "efron")`, which
-#' also silences glmnet 5.1's warning about the default tie handling.
+#' also silences glmnet 5.1's warning about the default tie handling. The
+#' pin is applied to an internal copy of the workflow, not to the workflow
+#' supplied: the workflow stored in the result
+#' (`tune::extract_workflow(res)`) carries the pin, so pass that workflow —
+#' not the workflow supplied here — to `tune::finalize_workflow()` when
+#' refitting the tuned model. Finalizing the supplied workflow refits
+#' without the pin, and so with glmnet's default tie handling.
 #'
 #' **Resamples.** Group them by subject, e.g. [rsample::group_vfold_cv()] with
 #' `group = subject_id`, or [subject_vfold_cv()], which also stratifies the
