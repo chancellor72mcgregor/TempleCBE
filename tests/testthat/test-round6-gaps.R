@@ -723,6 +723,7 @@ r6_feat_right <- function(n = 60, seed = 2) {
 }
 
 r6_feat_nested_right <- function(d, v = 2) {
+  set.seed(2)
   folds <- rsample::nested_cv(
     d,
     outside = rsample::vfold_cv(v = v),
@@ -843,6 +844,21 @@ test_that("A4: a row a split cannot score gets NA risk, not an error", {
   expect_length(risk, nrow(new_data))
   expect_true(is.na(risk[2]))
   expect_true(all(!is.na(risk[-2]) & risk[-2] >= 0 & risk[-2] <= 1))
+})
+
+test_that("A4: a missing predictor gives NA risk even where a split zeroed its coefficient", {
+  skip_if_no_coxnet_deps()
+  d <- r6_feat_right()
+  res <- r6_feat_nested_right(d)
+  # Force every split to a penalty that removes all predictors: the linear
+  # predictor is then 0 whatever x2 is, and glmnet's sparse product would
+  # silently score a row with a missing x2.
+  res$penalty <- vapply(res$.fits, function(f) max(f$fit$lambda), numeric(1))
+  new_data <- d[1:4, ]
+  new_data$x2[3] <- NA
+  risk <- suppressWarnings(predict_event_risk(res, new_data, horizon = 10))
+  expect_true(is.na(risk[3]))
+  expect_true(all(!is.na(risk[-3])))
 })
 
 test_that("A1: first-event IBS exists in cv_coxnet(recurrent = 'first')", {

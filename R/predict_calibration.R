@@ -246,11 +246,19 @@ predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
     )
   }
   per_split <- lapply(seq_len(nrow(object)), function(i) {
-    tryCatch(
-      extract_horizon_risk(
+    tryCatch({
+      risk_i <- extract_horizon_risk(
         stats::predict(fits[[i]], new_data, type = "survival", eval_time = horizon, penalty = object$penalty[i]),
         horizon
-      ),
+      )
+      # glmnet multiplies by sparse coefficients, so a missing value in a
+      # predictor the split's penalty set to zero does not propagate: the
+      # row would get a prediction as if the value were known. Mark any row
+      # with a missing model predictor NA, as documented.
+      x_i <- forge_matrix(new_data, fits[[i]])
+      risk_i[rowSums(is.na(as.matrix(x_i))) > 0] <- NA_real_
+      risk_i
+    },
       error = function(e) {
         warning(
           "Outer split `", object$id[i], "` could not predict `new_data` (", conditionMessage(e),
