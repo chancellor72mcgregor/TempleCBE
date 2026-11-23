@@ -416,13 +416,17 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         covariates = covariates,
         recurrent = recurrent,
         trunc = trunc,
-        glmnet_args = canonicalize_dots_for_hash(list(...))
+        glmnet_args = canonicalize_dots_for_hash(list(...)),
+        # Rows now carry the outer refit in `.fits`. Checkpoints written
+        # before that have no `.fits`, so they must not count as hits:
+        # predict_event_risk() could not use them, and a re-run would keep
+        # reusing them. This key makes them mismatch once and recompute.
+        keeps_fits = TRUE
       )
       # The `templecbe.cox_ties` option is the fit-time default when no
       # explicit `cox.ties` is passed (see fit_glmnet_cox()), so flipping
       # it would otherwise reuse the old checkpoints (R6-02). The default
-      # leaves the fingerprint as before, so existing breslow checkpoints
-      # stay valid.
+      # adds nothing here.
       if (!identical(get_templecbe_cox_ties(), "breslow")) payload$cox_ties <- get_templecbe_cox_ties()
       paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
     }, character(1))

@@ -32,6 +32,16 @@ r6_fp_ck_mtimes <- function(dir) {
   stats::setNames(file.info(fs)$mtime, fs)
 }
 
+# glmnet gained `cox.ties` after 4.1.8; DESCRIPTION allows glmnet >= 4.1.0.
+# Without it Breslow and Efron fit identically and these tests are vacuous.
+r6_fp_skip_if_no_cox_ties <- function() {
+  skip_if_not_installed("glmnet")
+  skip_if_not(
+    "cox.ties" %in% names(formals(glmnet::glmnet)),
+    "glmnet has no `cox.ties` argument (needs a newer glmnet)"
+  )
+}
+
 r6_fp_skip_if_no_tune_stack <- function() {
   for (pkg in c("rsample", "recipes", "parsnip", "workflows", "workflowsets", "tune", "dials")) {
     skip_if_not_installed(pkg)
@@ -56,6 +66,7 @@ r6_fp_poly_wset <- function() {
 
 test_that("cv_coxnet() checkpoint fingerprint includes glmnet ... arguments (R6-01)", {
   skip_if_no_coxnet_deps()
+  r6_fp_skip_if_no_cox_ties()
   d <- r6_fp_sim_tied(60)
   f <- survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3
   ck <- withr::local_tempdir("r6_fp_cv_")
@@ -92,6 +103,7 @@ test_that("cv_coxnet() checkpoint fingerprint includes glmnet ... arguments (R6-
 
 test_that("cv_coxnet() checkpoint fingerprint includes the templecbe.cox_ties option (R6-01)", {
   skip_if_no_coxnet_deps()
+  r6_fp_skip_if_no_cox_ties()
   d <- r6_fp_sim_tied(60)
   f <- survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3
   ck <- withr::local_tempdir("r6_fp_cv_opt_")
@@ -124,6 +136,7 @@ test_that("cv_coxnet() checkpoint fingerprint includes the templecbe.cox_ties op
 
 test_that("nested_cv_coxnet() checkpoint fingerprint includes the templecbe.cox_ties option (R6-02)", {
   skip_if_no_coxnet_deps()
+  r6_fp_skip_if_no_cox_ties()
   d <- r6_fp_sim_tied(60)
   f <- survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3
   set.seed(11)
