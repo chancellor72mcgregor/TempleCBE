@@ -14,6 +14,7 @@ if (getRversion() >= "2.15.1") {
     "conf.high",
     "conf.low",
     "counts",
+    "coxnet_dots",
     "cum_pct",
     "ecdf",
     "estimate",

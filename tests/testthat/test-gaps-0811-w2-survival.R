@@ -126,16 +126,16 @@ test_that("cv_coxnet(recurrent = 'gap') scores recurrent data on cgd (A1)", {
     ),
     "gap"
   )
-  # a non-concordance metric set is an error in gap mode
+  # a non-concordance, non-Brier metric set is an error in gap mode
   expect_error(
     cv_coxnet(
       survival::Surv(tstart, tstop, status) ~ treat + age,
       data = cgd, subject_id = "id",
       mixture = 1, v = 3, nlambda = 10, recurrent = "gap",
-      metrics = yardstick::metric_set(yardstick::brier_survival_integrated),
+      metrics = yardstick::metric_set(yardstick::roc_auc_survival),
       cox.ties = "breslow", seed = 1
     ),
-    "concordance"
+    "roc_auc_survival"
   )
 })
 

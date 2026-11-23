@@ -47,12 +47,24 @@
 #' Recurrent events (an event before a subject's last interval) stop with an
 #' error unless `recurrent` says otherwise: `"first"` scores the time to first
 #' event ([surv_subject_truth()]), and `"gap"` scores the whole recurrent
-#' process by gap-time concordance (see [surv_gap_truth()]). Gap-time
-#' concordance is Harrell's C over gaps, using each interval's linear
-#' predictor as its risk: it treats a subject's gaps as independent
-#' observations, needs no censoring weights, and is the only metric in gap
-#' mode. A recurrent-event Brier score is not computed; that is follow-up
-#' work, not part of this draft.
+#' process by gap (see [surv_gap_truth()]). Gap-time concordance is Harrell's
+#' C over gaps, using each interval's linear predictor as its risk: it treats
+#' a subject's gaps as independent observations and needs no censoring
+#' weights. The gap-time Brier score (integrated, `brier_survival_integrated`,
+#' or at one time, `brier_survival`) scores each gap by its conditional
+#' gap-time survival under the fitted Andersen-Gill model -- the Breslow
+#' baseline hazard integrated over the gap's own window, times the gap's
+#' linear predictor -- with gap-level inverse-probability-of-censoring
+#' weights that condition on the gap's entry time (see [predict_gap_survival()]
+#' and [gap_graf_weights()]). The censoring distribution `G` is the reverse
+#' Kaplan-Meier on the training subjects' full follow-up -- each subject's
+#' last interval ([surv_subject_truth()] with `recurrent = "last"`), so a
+#' subject's censoring time counts whenever follow-up ends in censoring,
+#' not only when it ends at the first event. The Brier score is integrated over `eval_time`
+#' the way [yardstick::brier_survival_integrated()] integrates it, and
+#' averaged over gaps, so like concordance it describes gaps, not subjects.
+#' Gap mode defaults to concordance only; pass `metrics` to add the Brier
+#' scores, and `roc_auc_survival` is not available there.
 #'
 #' **Selection.** `lambda.min` is the penalty, across all `mixture` values,
 #' with the best mean `metric` over folds (for time-specific metrics, at the
@@ -100,7 +112,8 @@
 #' @param v Number of folds when `resamples` is `NULL`.
 #' @param metrics A [yardstick::metric_set()] of survival metrics. Defaults to
 #'   the integrated Brier score, concordance, time-specific Brier score, and
-#'   time-dependent ROC AUC.
+#'   time-dependent ROC AUC. In gap mode only `concordance_survival`,
+#'   `brier_survival_integrated` and `brier_survival` are available.
 #' @param eval_time Evaluation times. Defaults to deciles (10th to 90th
 #'   percentile) of the observed event times.
 #' @param metric Name of the metric used to choose settings; the first metric
@@ -109,10 +122,11 @@
 #' @param recurrent How recurrent (start/stop) data are scored: `"error"`
 #'   (default; a subject with an event before its last interval stops the fit),
 #'   `"first"` (score the time to the first event only), or `"gap"` (score the
-#'   whole recurrent process by gap-time concordance; see Details). In gap
-#'   mode `metrics` must contain only `concordance_survival` (the default
-#'   there), and `eval_time` is used only for the refit model's predictions,
-#'   not for scoring.
+#'   whole recurrent process by gap; see Details). In gap mode `metrics` may
+#'   contain `concordance_survival` (the default there), `brier_survival_integrated`
+#'   and `brier_survival`, and `eval_time` sets the gap times the Brier score
+#'   is integrated over (with concordance only, it is used only for the refit
+#'   model's predictions, not for scoring).
 #' @param trunc Lower bound for the censoring probability in the Graf weights.
 #' @param parallel If `TRUE`, fit folds with [furrr::future_map()]; set a
 #'   [future::plan()] first.
@@ -419,19 +433,20 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
   covariates <- match.arg(covariates)
   recurrent <- match.arg(recurrent)
   gap_mode <- identical(recurrent, "gap")
-  # Gap-time concordance is the only metric that scores the whole recurrent
-  # process; the other yardstick survival metrics need one event time per
-  # subject and a survival curve per subject.
+  # Gap mode scores gap-time concordance and gap-time Brier scores; the other
+  # yardstick survival metrics need one event time per subject and a survival
+  # curve per subject, which gaps do not have.
+  gap_brier_names <- c("brier_survival_integrated", "brier_survival")
   if (gap_mode) {
     if (is.null(metrics)) {
       metrics <- yardstick::metric_set(yardstick::concordance_survival)
     } else {
       gap_info <- surv_metric_info(metrics)
-      if (!all(gap_info$metric == "concordance_survival")) {
+      if (!all(gap_info$metric %in% c("concordance_survival", gap_brier_names))) {
         stop(
-          "`recurrent = \"gap\"` scores gap-time concordance only; pass ",
-          "`metrics = yardstick::metric_set(yardstick::concordance_survival)`. ",
-          "A recurrent-event Brier score is not implemented.",
+          "`recurrent = \"gap\"` scores gap-time concordance and gap-time Brier scores only; pass ",
+          "`metrics` with `concordance_survival`, `brier_survival_integrated` or `brier_survival`. ",
+          "`roc_auc_survival` is not available in gap mode.",
           call. = FALSE
         )
       }
@@ -509,6 +524,17 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     check_resample_overlap(resamples, spec, "`resamples`")
   }
 
+  # In gap mode the requested metrics split into the concordance path and the
+  # Brier path (which needs the training baseline and censoring distribution).
+  gap_has_concordance <- gap_mode && any(info$metric == "concordance_survival")
+  gap_brier_metrics <- if (gap_mode) {
+    brier_names <- intersect(info$metric, gap_brier_names)
+    if (length(brier_names)) yardstick_metric_set(brier_names) else NULL
+  } else {
+    NULL
+  }
+  gap_brier_info <- if (!is.null(gap_brier_metrics)) surv_metric_info(gap_brier_metrics) else NULL
+
   # `active` holds, for each `mixture`, the penalties still to be scored: the
   # whole path in a grid search, the surviving candidates while racing (an
   # empty vector skips that mixture's fit).
@@ -530,6 +556,7 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
     if (gap_mode) {
       # Gap-time concordance needs no censoring weights and no baseline
       # hazard: each assessment interval is scored by its linear predictor.
+      # The gap-time Brier score needs both, from the training data.
       return(purrr::list_rbind(purrr::pmap(list(mixture, paths, active), function(m, path, score_at) {
         if (!length(score_at)) return(NULL)
         fit <- tryCatch(fit_glmnet_cox(train$x, train$y, m, path, glmnet_args), error = function(e) e)
@@ -537,7 +564,19 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
           warning("glmnet failed on a resample at mixture ", m, ": ", conditionMessage(fit), call. = FALSE)
           return(NULL)
         }
-        res <- score_gap_path(fit, test$x, test$y, subject_test, penalty = score_at)
+        parts <- list()
+        if (gap_has_concordance) {
+          parts <- c(parts, list(score_gap_path(fit, test$x, test$y, subject_test, penalty = score_at)))
+        }
+        if (!is.null(gap_brier_metrics)) {
+          subject_train <- subject_keys(train$y, subject_values(analysis, spec))
+          parts <- c(parts, list(score_gap_brier_path(
+            fit, train$x, train$y, subject_train, test$x, test$y, subject_test,
+            penalty = score_at, eval_time = eval_time, metrics = gap_brier_metrics,
+            info = gap_brier_info, trunc = trunc
+          )))
+        }
+        res <- purrr::list_rbind(parts)
         res$mixture <- m
         res
       })))
@@ -572,6 +611,8 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
   score_split <- with_worker_env(
     score_split,
     covariates = covariates, eval_time = eval_time, gap_mode = gap_mode, glmnet_args = glmnet_args,
+    gap_brier_info = gap_brier_info, gap_brier_metrics = gap_brier_metrics,
+    gap_has_concordance = gap_has_concordance,
     info = info, metrics = metrics, mixture = mixture, paths = paths, recurrent = recurrent,
     spec = worker_spec, trunc = trunc
   )
@@ -864,6 +905,37 @@ score_gap_path <- function(fit, x_new, y_new, subject_new, penalty) {
       .estimate = est
     )
   }))
+}
+
+#' Score a glmnet Cox Fit Along a Penalty Path by Gap-Time Brier Score
+#'
+#' For recurrent data: each assessment gap is scored by its conditional
+#' gap-time survival ([predict_gap_survival()]) with gap-level IPCW weights
+#' ([gap_graf_weights()]), and the Brier metrics are computed by yardstick on
+#' one row per gap. The baseline hazard and the censoring distribution come
+#' from the training data, as in [score_coxnet_path()].
+#'
+#' @return A tibble with `penalty`, `.metric`, `.estimator`, `.eval_time`
+#'   and `.estimate`, one row per penalty per Brier metric (per evaluation
+#'   time for time-specific metrics). A penalty whose predictions are not all
+#'   finite is scored `NA`, mirroring [compute_surv_metrics()].
+#' @keywords internal
+#' @noRd
+score_gap_brier_path <- function(fit, x_train, y_train, subject_train, x_new, y_new, subject_new,
+                                 penalty, eval_time, metrics, info, trunc) {
+  train <- surv_components(y_train)
+  bh <- breslow_cumhaz(coxnet_link(fit, x_train, penalty), train$start, train$stop, train$status)
+  censoring <- censoring_km(
+    surv_subject_truth(y_train, subject_train, recurrent = "last")$.truth
+  )
+  gap_truth <- surv_gap_truth(y_new, subject_new)
+  parts <- surv_components(y_new)
+  ord <- order(subject_new, parts$start, parts$stop)
+  lp <- coxnet_link(fit, x_new, penalty)[ord, , drop = FALSE]
+  surv <- predict_gap_survival(bh, gap_truth$.entry, lp, eval_time)
+  weights <- gap_graf_weights(gap_truth, eval_time, censoring, trunc)
+  frame <- surv_metric_frame(gap_truth$.truth, surv, eval_time, weights, penalty)
+  compute_surv_metrics(frame, metrics, info)
 }
 
 #' Score a glmnet Cox Fit Along a Penalty Path on New Data

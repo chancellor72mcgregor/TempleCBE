@@ -45,7 +45,8 @@ surv_components <- function(truth, arg = "truth") {
 #' For counting-process data, a subject's time is the stop time of their last
 #' interval and their event status is the status of that interval. Rows are
 #' checked first: within a subject, intervals must not overlap, and an event
-#' may only occur in the last interval, unless `recurrent = "first"`.
+#' may only occur in the last interval, unless `recurrent = "first"` (time to
+#' first event) or `recurrent = "last"` (end of follow-up, below).
 #'
 #' With `recurrent = "first"` (recurrent events, such as repeated readmissions)
 #' a subject is scored on the time to their **first** event: the rows after the
@@ -56,13 +57,27 @@ surv_components <- function(truth, arg = "truth") {
 #' instead of only the first event, see [surv_gap_truth()] and
 #' `cv_coxnet(recurrent = "gap")`, which score gap-time concordance.
 #'
+#' With `recurrent = "last"` a subject is summarised by the **end of their
+#' follow-up**: the stop of their last interval, with that interval's status
+#' (an event in the last interval, or censoring). That is the outcome the
+#' calendar censoring distribution is estimated from for gap-time scoring
+#' (`cv_coxnet(recurrent = "gap")`): a subject's censoring time `C` is only
+#' revealed when follow-up ends in censoring, so first-event times would
+#' understate late censoring -- most subjects are still under follow-up long
+#' after their first event, and a reverse Kaplan-Meier on first-event times
+#' is badly biased at late times. Do not use `recurrent = "last"` to score a
+#' subject's survival: it describes when follow-up ended, not when the
+#' subject's event happened.
+#'
 #' @param truth A [survival::Surv()] object: `Surv(time, event)` or
 #'   `Surv(start, stop, event)`.
 #' @param subject_id Subject identifiers, one per element of `truth`. Required
 #'   for counting-process data; for right-censored data each row is its own
 #'   subject when `subject_id` is `NULL`.
 #' @param recurrent `"error"` (default) stops when a subject has an event before
-#'   their last interval; `"first"` keeps each subject's time to first event.
+#'   their last interval; `"first"` keeps each subject's time to first event;
+#'   `"last"` keeps each subject's last interval (end of follow-up), for
+#'   estimating the calendar censoring distribution in gap-time scoring.
 #' @return A tibble with one row per subject, sorted by `subject_id`:
 #'   * `.subject_id`: the subject identifier, with the type and values of
 #'     `subject_id` (the row number, `1:n`, for right-censored data without
@@ -88,7 +103,7 @@ surv_components <- function(truth, arg = "truth") {
 #'     subject_id = long$subject_id
 #'   )
 #' }
-surv_subject_truth <- function(truth, subject_id = NULL, recurrent = c("error", "first")) {
+surv_subject_truth <- function(truth, subject_id = NULL, recurrent = c("error", "first", "last")) {
   rlang::check_installed("survival", reason = "to build survival truth.")
   recurrent <- match.arg(recurrent)
   parts <- surv_components(truth)
@@ -137,6 +152,20 @@ surv_subject_truth <- function(truth, subject_id = NULL, recurrent = c("error", 
     status <- status[keep]
     first <- !duplicated(sid)
     last <- !duplicated(sid, fromLast = TRUE)
+  } else if (identical(recurrent, "last")) {
+    # keep each subject's last interval only: end of follow-up. A subject's
+    # censoring time is revealed only when follow-up ends in censoring, so
+    # the calendar censoring distribution for gap-time scoring is estimated
+    # from these last intervals, not from first-event times. `.entry` stays
+    # the start of the subject's first interval, as documented.
+    entry <- start[first]
+    keep <- last
+    sid <- sid[keep]
+    stop <- stop[keep]
+    status <- status[keep]
+    start <- entry
+    first <- !duplicated(sid)
+    last <- !duplicated(sid, fromLast = TRUE)
   } else if (any(early)) {
     stop(
       "Subject(s) with an event before their last interval: ", format_ids(sid[early]),
@@ -168,9 +197,9 @@ surv_subject_truth <- function(truth, subject_id = NULL, recurrent = c("error", 
 #' Gaps within a subject are correlated -- a subject with a short first gap
 #' tends to have short later gaps -- and gap-time concordance treats them as
 #' independent observations, so it describes the ordering of gaps, not of
-#' subjects. There is no recurrent-event Brier score here: a recurrent IBS
-#' (scoring the whole counting process, not one gap at a time) is follow-up
-#' work, not part of this draft.
+#' subjects. Gap-time Brier scores use the same one-row-per-gap truth, with
+#' the conditional gap-time survival ([predict_gap_survival()]) and gap-level
+#' censoring weights ([gap_graf_weights()]); see `cv_coxnet(recurrent = "gap")`.
 #'
 #' @param truth A [survival::Surv()] object: `Surv(time, event)` or
 #'   `Surv(start, stop, event)`.
@@ -271,6 +300,108 @@ gap_time_concordance <- function(gap_truth, lp) {
     truth = "truth", estimate = "estimate"
   )$.estimate[1]
   if (length(est) != 1L || is.nan(est)) NA_real_ else unname(est)
+}
+
+#' Conditional Gap-Time Survival From a Fitted Andersen-Gill Model
+#'
+#' For a gap starting at calendar time `s` with linear predictor `eta`, the
+#' Andersen-Gill model implies the conditional survival of the remaining gap
+#' time `u` is `S(u | s, eta) = exp(-[H0(s + u) - H0(s)] * exp(eta))`, where
+#' `H0` is the Breslow baseline cumulative hazard on calendar time. The
+#' baseline is integrated over the gap's own window, so a gap that starts late
+#' (when the baseline hazard has accumulated) is predicted a shorter remaining
+#' time than the same covariates starting at time 0. Each gap is scored by its
+#' own interval's linear predictor, regardless of `covariates`.
+#'
+#' @param bh Output of [breslow_cumhaz()] on the training data.
+#' @param entry Numeric vector of gap entry (calendar start) times, one per
+#'   gap, in the same row order as `lp`.
+#' @param lp Numeric matrix of per-gap linear predictors (rows by penalties).
+#' @param eval_time Gap-time evaluation times.
+#' @return An array of gaps by evaluation times by penalties with the
+#'   predicted conditional gap-time survival.
+#' @keywords internal
+#' @noRd
+predict_gap_survival <- function(bh, entry, lp, eval_time) {
+  lp <- as.matrix(lp)
+  n_gaps <- length(entry)
+  n_times <- length(eval_time)
+  surv <- array(NA_real_, c(n_gaps, n_times, ncol(lp)))
+  h0_entry <- cumhaz_at(bh, entry)
+  for (l in seq_len(ncol(lp))) {
+    h0_plus <- matrix(
+      cumhaz_at(bh, as.vector(outer(entry, eval_time, "+")))[, l],
+      nrow = n_gaps, ncol = n_times
+    )
+    surv[, , l] <- exp(-(h0_plus - h0_entry[, l]) * exp(lp[, l]))
+  }
+  surv
+}
+
+#' Gap-Level Inverse Probability of Censoring Weights
+#'
+#' Graf weights for gap-time scoring, conditional on each gap's entry time.
+#' Censoring is a subject-level calendar time `C`, independent of the event
+#' process given covariates, so a gap starting at calendar time `s` exists
+#' only when `C > s`, and its censoring survival at gap time `u` is
+#' `G(s + u) / G(s)` with `G` the calendar censoring distribution. At gap
+#' time `t`, a gap still event-free gets `1 / max(G(s + t) / G(s), trunc)`; a
+#' gap with an event by `t` gets `1 / max(G((s + Y)^-) / G(s), trunc)` with
+#' `Y` its gap time; a gap censored by `t` gets 0, as its status at `t` is
+#' unknown. A pooled gap-level censoring distribution is not used: gap
+#' censoring times `C - s` shrink with the entry time, so pooling over gaps
+#' would under-weight late gaps.
+#'
+#' @param gap_truth Output of [surv_gap_truth()].
+#' @param eval_time Gap-time evaluation times.
+#' @param censoring A [censoring_km()] object, estimated on the training
+#'   subjects' calendar censoring times. For gap-time scoring that is the
+#'   reverse Kaplan-Meier on each training subject's full follow-up
+#'   ([surv_subject_truth()] with `recurrent = "last"`): estimating it from
+#'   first-event times instead would understate late censoring, because most
+#'   subjects are still under follow-up long after their first event.
+#' @param trunc Lower bound for the conditional censoring probability, capping
+#'   weights at `1 / trunc`.
+#' @return A numeric matrix with one row per gap and one column per
+#'   `eval_time`.
+#' @keywords internal
+#' @noRd
+gap_graf_weights <- function(gap_truth, eval_time, censoring, trunc = 0.05) {
+  if (!is.data.frame(gap_truth) || !all(c(".entry", ".truth") %in% names(gap_truth))) {
+    stop("`gap_truth` must be the output of surv_gap_truth().", call. = FALSE)
+  }
+  if (!inherits(censoring, "censoring_km")) {
+    stop("`censoring` must be a censoring_km() object.", call. = FALSE)
+  }
+  check_eval_time(eval_time, min_length = 1)
+  check_trunc(trunc)
+  parts <- surv_components(gap_truth$.truth)
+  time <- parts$stop
+  status <- parts$status
+  entry <- gap_truth$.entry
+  n <- length(time)
+  n_times <- length(eval_time)
+  y_mat <- matrix(time, n, n_times)
+  t_mat <- matrix(eval_time, n, n_times, byrow = TRUE)
+  at_risk <- y_mat > t_mat
+  event_by_t <- !at_risk & status == 1
+  g_entry <- as.numeric(stats::predict(censoring, entry, trunc = 0))
+  g_plus <- matrix(
+    as.numeric(stats::predict(censoring, as.vector(outer(entry, eval_time, "+")), trunc = 0)),
+    nrow = n, ncol = n_times
+  )
+  g_event <- as.numeric(stats::predict(censoring, entry + time, left = TRUE, trunc = 0))
+  cond <- matrix(NA_real_, n, n_times)
+  cond[at_risk] <- (g_plus / g_entry)[at_risk]
+  cond[event_by_t] <- (g_event / g_entry)[row(cond)[event_by_t]]
+  # A gap whose entry is past the training censoring support has no finite
+  # conditional censoring probability; cap its weight like any other.
+  cond[!is.finite(cond)] <- trunc
+  weights <- matrix(0, n, n_times)
+  active <- at_risk | event_by_t
+  weights[active] <- 1 / pmax(cond[active], trunc)
+  dimnames(weights) <- list(NULL, format(eval_time))
+  weights
 }
 
 #' Kaplan-Meier Estimate of the Censoring Distribution
