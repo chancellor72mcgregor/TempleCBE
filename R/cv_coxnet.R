@@ -620,8 +620,20 @@ cv_coxnet_impl <- function(spec, data = spec$data, mixture = 1, penalty = NULL, 
         metrics = metrics_repr,
         covariates = covariates,
         recurrent = recurrent,
-        trunc = trunc
+        trunc = trunc,
+        # Every glmnet `...` argument changes the fits (R6-01), so it
+        # belongs in the fingerprint. It is always present, so checkpoints
+        # written before this fix mismatch once and are recomputed: they
+        # carry no record of the arguments they were computed with.
+        glmnet_args = glmnet_args
       )
+      # The `templecbe.cox_ties` option is the fit-time default when no
+      # explicit `cox.ties` is passed (see fit_glmnet_cox()). With an
+      # explicit penalty path the fitted path does not move with it, so a
+      # flipped option would otherwise reuse the old checkpoints too. The
+      # default leaves the fingerprint as before, so existing breslow
+      # checkpoints stay valid.
+      if (!identical(get_templecbe_cox_ties(), "breslow")) payload$cox_ties <- get_templecbe_cox_ties()
       paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
     }, character(1))
 
@@ -826,7 +838,10 @@ default_gap_eval_time <- function(gap_truth) {
 #' scoring.
 #'
 #' @return A tibble with `penalty`, `.metric`, `.estimator`, `.eval_time`
-#'   (`NA`) and `.estimate`, one row per penalty.
+#'   (`NA`) and `.estimate`, one row per penalty. A penalty whose linear
+#'   predictors are not all finite (glmnet can return `NaN` at an extreme
+#'   penalty on a small fold) is scored `NA` instead of stopping the run,
+#'   mirroring [compute_surv_metrics()].
 #' @keywords internal
 #' @noRd
 score_gap_path <- function(fit, x_new, y_new, subject_new, penalty) {
@@ -835,12 +850,18 @@ score_gap_path <- function(fit, x_new, y_new, subject_new, penalty) {
   ord <- order(subject_new, parts$start, parts$stop)
   lp <- coxnet_link(fit, x_new, penalty)[ord, , drop = FALSE]
   purrr::list_rbind(lapply(seq_along(penalty), function(l) {
+    lp_l <- lp[, l]
+    est <- if (!is.numeric(lp_l) || length(lp_l) != nrow(gap_truth) || any(!is.finite(lp_l))) {
+      NA_real_
+    } else {
+      gap_time_concordance(gap_truth, lp_l)
+    }
     tibble::tibble(
       penalty = penalty[l],
       .metric = "concordance_survival",
       .estimator = "standard",
       .eval_time = NA_real_,
-      .estimate = gap_time_concordance(gap_truth, lp[, l])
+      .estimate = est
     )
   }))
 }

@@ -132,24 +132,45 @@ extract_horizon_risk <- function(pred, horizon) {
 #'
 #' Predicts the event probability by `horizon` (one minus the survival
 #' probability) for new data under a fitted [coxnet()], [cv_coxnet()],
-#' [joint_model()], [cox_time_varying()] or [fine_gray()] model. This is the
-#' model-level adapter: for the raw `predict()` output, use
-#' [extract_horizon_risk()]. For a [fine_gray()] fit the risk is the
-#' cumulative incidence (CIF) of the cause of interest at `horizon`, not one
-#' minus a survival probability.
+#' [joint_model()], [cox_time_varying()], [fine_gray()] or
+#' [nested_cv_coxnet()] model. This is the model-level adapter: for the raw
+#' `predict()` output, use [extract_horizon_risk()]. For a [fine_gray()] fit
+#' the risk is the cumulative incidence (CIF) of the cause of interest at
+#' `horizon`, not one minus a survival probability.
 #'
 #' (A plain function dispatching on the model class, not an S3 generic, so it
 #' works as written: the S3 split is a follow-up for the roxygen run that
 #' regenerates `NAMESPACE`.)
 #'
+#' @details
+#' **Nested cross-validation results.** A `nested_cv_coxnet()` result has no
+#' single final model: each outer split refit the model on its own analysis
+#' set at its own chosen `mixture` and `penalty`. The risk is therefore one
+#' minus the mean of the outer splits' predicted survival at `horizon`, each
+#' split predicting at its own chosen `penalty` from its kept refit (the
+#' `.fits` column). A split that cannot score a row — a missing predictor, or
+#' a factor level its analysis set never saw — contributes `NA` for that row,
+#' and the mean is over the splits that could score it; a row no split could
+#' score gets `NA` risk. A split whose prediction fails outright is skipped
+#' with a warning naming the split, and if no split can predict at all the
+#' call errors rather than returning all-`NA` risk. Results created before
+#' the refits were kept (no `.fits` column) cannot be predicted from: re-run
+#' `nested_cv_coxnet()` to get one that can. As for [predict.coxnet_model()],
+#' each split's covariates are taken as constant from time 0, so the risk is
+#' the refits' implied survival from study entry — for a gap-mode run
+#' (`recurrent = "gap"`) that is the counting-process model's calendar-time
+#' survival, not a gap-time survival: a gap-time Brier score is not
+#' implemented, and this adapter does not invent one.
+#'
 #' @param object A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
-#'   `cox_time_varying` or `fine_gray_model` object.
+#'   `cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object.
 #' @param new_data A data frame of new predictors, as for `predict()`.
 #' @param horizon A single finite, positive time: the horizon the risk applies to.
 #' @param penalty For `coxnet_model`: the penalty to predict at; defaults to
 #'   the model's `penalty`. For `cv_coxnet`: `"lambda.min"` (default),
 #'   `"lambda.1se"`, or a number. Ignored for `joint_model`,
-#'   `cox_time_varying` and `fine_gray_model`.
+#'   `cox_time_varying`, `fine_gray_model` and `nested_cv_coxnet` (each outer
+#'   split predicts at its own chosen penalty; see Details).
 #' @param ... Not used.
 #' @return A numeric vector of event probabilities by `horizon`, one per row
 #'   of `new_data`.
@@ -193,10 +214,68 @@ predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
     # The CIF is a step function, so any horizon is a valid prediction time;
     # extract_horizon_risk() returns the CIF itself for `.pred_cif` curves.
     pred <- stats::predict(object, new_data, times = horizon)
+  } else if (inherits(object, "nested_cv_coxnet")) {
+    return(.nested_cv_event_risk(object, new_data, horizon))
   } else {
     stop("No `predict_event_risk()` method for class ", paste(class(object), collapse = ", "), ".", call. = FALSE)
   }
   extract_horizon_risk(pred, horizon)
+}
+
+# Event risk at one horizon from a nested_cv_coxnet() result: one minus the
+# mean of the outer splits' predicted survival at the horizon, each split at
+# its own chosen penalty (see predict_event_risk() Details for the design).
+# @noRd
+.nested_cv_event_risk <- function(object, new_data, horizon) {
+  if (!".fits" %in% names(object)) {
+    stop(
+      "`object` has no `.fits` column: it was created before nested_cv_coxnet() kept the outer-split refits, ",
+      "so it cannot be predicted from. Re-run nested_cv_coxnet() to get a result that can.",
+      call. = FALSE
+    )
+  }
+  if (!is.data.frame(new_data)) {
+    stop("`new_data` must be a data frame.", call. = FALSE)
+  }
+  fits <- object$.fits
+  bad <- vapply(fits, function(f) !inherits(f, "coxnet_model"), logical(1))
+  if (any(bad)) {
+    stop(
+      "`object$.fits` must hold a `coxnet_model` refit per outer split; split(s) ",
+      paste(object$id[bad], collapse = ", "), " do not.", call. = FALSE
+    )
+  }
+  per_split <- lapply(seq_len(nrow(object)), function(i) {
+    tryCatch({
+      risk_i <- extract_horizon_risk(
+        stats::predict(fits[[i]], new_data, type = "survival", eval_time = horizon, penalty = object$penalty[i]),
+        horizon
+      )
+      # glmnet multiplies by sparse coefficients, so a missing value in a
+      # predictor the split's penalty set to zero does not propagate: the
+      # row would get a prediction as if the value were known. Mark any row
+      # with a missing model predictor NA, as documented.
+      x_i <- forge_matrix(new_data, fits[[i]])
+      risk_i[rowSums(is.na(as.matrix(x_i))) > 0] <- NA_real_
+      risk_i
+    },
+      error = function(e) {
+        warning(
+          "Outer split `", object$id[i], "` could not predict `new_data` (", conditionMessage(e),
+          "); it contributes no risk for these rows.", call. = FALSE
+        )
+        rep(NA_real_, nrow(new_data))
+      }
+    )
+  })
+  mat <- do.call(cbind, per_split)
+  n_ok <- rowSums(!is.na(mat))
+  if (!any(n_ok > 0L)) {
+    stop("No outer split could predict `new_data`; see the warnings.", call. = FALSE)
+  }
+  risk <- rowMeans(mat, na.rm = TRUE)
+  risk[n_ok == 0L] <- NA_real_
+  unname(risk)
 }
 
 # The Surv outcome and the event-risk vector for a model's validation, from
@@ -231,7 +310,8 @@ predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
 #' Calibration Table of a Fitted Survival Model
 #'
 #' Validates a fitted [coxnet()], [cv_coxnet()], [joint_model()],
-#' [cox_time_varying()] or [fine_gray()] model at one horizon: the event risk
+#' [cox_time_varying()], [fine_gray()] or [nested_cv_coxnet()] model at one
+#' horizon: the event risk
 #' is predicted with [predict_event_risk()] and passed, with the
 #' right-censored outcome from `new_data`, to [calibration_table()]. See there
 #' for the bins, the observed risks and the metrics; competing events are
@@ -256,7 +336,9 @@ predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
 #' calibration-in-the-large.
 #'
 #' @param object A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
-#'   `cox_time_varying` or `fine_gray_model` object.
+#'   `cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object. For a
+#'   `nested_cv_coxnet` result the risk is one minus the mean of the outer
+#'   splits' predicted survival at `horizon` (see [predict_event_risk()]).
 #' @param new_data A data frame with the predictors and the `time_col` /
 #'   `event_col` outcome columns. For a `fine_gray_model` fit, `event_col`
 #'   holds the competing-risk event codes (censoring code, then one code per
@@ -267,7 +349,7 @@ predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
 #' @param horizon A single finite, positive time: the horizon the calibration applies
 #'   to.
 #' @param penalty Passed to [predict_event_risk()]; ignored for `joint_model`,
-#'   `cox_time_varying` and `fine_gray_model`.
+#'   `cox_time_varying`, `fine_gray_model` and `nested_cv_coxnet`.
 #' @param ... Passed to [calibration_table()] (for example `bins` or
 #'   `conf_level`).
 #' @return As [calibration_table()]: a tibble with one row per model and bin,
@@ -292,7 +374,8 @@ calibration_from_model <- function(object, new_data, time_col, event_col, horizo
 #' Decision Curve of a Fitted Survival Model
 #'
 #' Validates a fitted [coxnet()], [cv_coxnet()], [joint_model()],
-#' [cox_time_varying()] or [fine_gray()] model at one horizon: the event risk
+#' [cox_time_varying()], [fine_gray()] or [nested_cv_coxnet()] model at one
+#' horizon: the event risk
 #' is predicted with [predict_event_risk()] and passed, with the
 #' right-censored outcome from `new_data`, to [decision_curve()]. See there
 #' for the net-benefit definition; competing events are treated as censoring,
@@ -302,7 +385,9 @@ calibration_from_model <- function(object, new_data, time_col, event_col, horizo
 #' as censoring.
 #'
 #' @param object A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
-#'   `cox_time_varying` or `fine_gray_model` object.
+#'   `cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object. For a
+#'   `nested_cv_coxnet` result the risk is one minus the mean of the outer
+#'   splits' predicted survival at `horizon` (see [predict_event_risk()]).
 #' @param new_data A data frame with the predictors and the `time_col` /
 #'   `event_col` outcome columns. For a `fine_gray_model` fit, `event_col`
 #'   holds the competing-risk event codes, as in [fine_gray()].
@@ -312,7 +397,7 @@ calibration_from_model <- function(object, new_data, time_col, event_col, horizo
 #' @param horizon A single finite, positive time: the horizon the decision curve
 #'   applies to.
 #' @param penalty Passed to [predict_event_risk()]; ignored for `joint_model`,
-#'   `cox_time_varying` and `fine_gray_model`.
+#'   `cox_time_varying`, `fine_gray_model` and `nested_cv_coxnet`.
 #' @param ... Passed to [decision_curve()] (for example `thresholds`).
 #' @return As [decision_curve()]: a tibble of class `decision_curve` with one
 #'   row per threshold.

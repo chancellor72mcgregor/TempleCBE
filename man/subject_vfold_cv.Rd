@@ -26,7 +26,8 @@ subject_nested_cv(
   repeats = 1,
   event = 1,
   pool = 0.1,
-  keep_status = FALSE
+  keep_status = FALSE,
+  ...
 )
 }
 \arguments{
@@ -46,14 +47,25 @@ grouped folds without stratification.}
 factor or character `status` is matched on its labels, so a factor with
 levels `"0"`/`"1"` works as is, and one with levels
 `c("censored", "event")` needs `event = "event"` (an `event` that is not
-a label is an error). A logical `status` counts `TRUE` as the event.}
+a label is an error). A logical `status` counts `TRUE` as the event
+(`event` must be logical, or a value that coerces to logical without
+producing `NA`, e.g. `1`/`0`). A numeric `status` needs a numeric or
+logical `event`.}
 
 \item{pool}{Passed to [rsample::group_vfold_cv()]: strata holding fewer
 than this share of the subjects are pooled.}
 
-\item{keep_status}{Keep the `subject_status` column in the splits' data.}
+\item{keep_status}{Keep the helper column in the splits' data:
+`subject_status`, or `.subject_status` if a column of that name already
+exists in `data` (the existing column is left in place).}
 
-\item{...}{Passed to [rsample::group_vfold_cv()].}
+\item{...}{Passed to [rsample::group_vfold_cv()] (to both the outer and
+the inner folds in `subject_nested_cv()`). In practice only `balance`
+is forwarded usefully, as `rsample` accepts no other extras.
+`group` and `strata` cannot be passed through `...`: they are set by
+these functions (and `v` is not a `subject_nested_cv()` argument either).
+Pass `v`, `repeats` and `pool` — `outer_v`/`inner_v` for
+`subject_nested_cv()` — as direct arguments instead.}
 
 \item{outer_v, inner_v}{The number of outer and inner folds.}
 }
@@ -75,6 +87,8 @@ function that takes resamples: [nested_cv_coxnet()], [cv_coxnet()],
 The stratification column only exists while the folds are built: with
 `keep_status = FALSE` (default) it is removed from the data the splits
 hold, so a `y ~ .` formula or recipe does not pick it up as a predictor.
+If `data` already has a `subject_status` column, the helper is named
+`.subject_status` instead and the existing column is left in place.
 }
 \examples{
 \donttest{

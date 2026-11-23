@@ -3,7 +3,7 @@
 
 skip_if_no_v0130_deps <- function() {
   for (pkg in c("glmnet", "survival", "rsample", "yardstick", "withr")) {
-    testthat::skip_if_not_installed(pkg)
+    skip_if_not_installed(pkg)
   }
 }
 

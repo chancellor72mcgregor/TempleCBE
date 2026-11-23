@@ -8,7 +8,7 @@ predict_event_risk(object, new_data, horizon, penalty = NULL, ...)
 }
 \arguments{
 \item{object}{A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
-`cox_time_varying` or `fine_gray_model` object.}
+`cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object.}
 
 \item{new_data}{A data frame of new predictors, as for `predict()`.}
 
@@ -17,7 +17,8 @@ predict_event_risk(object, new_data, horizon, penalty = NULL, ...)
 \item{penalty}{For `coxnet_model`: the penalty to predict at; defaults to
 the model's `penalty`. For `cv_coxnet`: `"lambda.min"` (default),
 `"lambda.1se"`, or a number. Ignored for `joint_model`,
-`cox_time_varying` and `fine_gray_model`.}
+`cox_time_varying`, `fine_gray_model` and `nested_cv_coxnet` (each outer
+split predicts at its own chosen penalty; see Details).}
 
 \item{...}{Not used.}
 }
@@ -28,16 +29,36 @@ A numeric vector of event probabilities by `horizon`, one per row
 \description{
 Predicts the event probability by `horizon` (one minus the survival
 probability) for new data under a fitted [coxnet()], [cv_coxnet()],
-[joint_model()], [cox_time_varying()] or [fine_gray()] model. This is the
-model-level adapter: for the raw `predict()` output, use
-[extract_horizon_risk()]. For a [fine_gray()] fit the risk is the
-cumulative incidence (CIF) of the cause of interest at `horizon`, not one
-minus a survival probability.
+[joint_model()], [cox_time_varying()], [fine_gray()] or
+[nested_cv_coxnet()] model. This is the model-level adapter: for the raw
+`predict()` output, use [extract_horizon_risk()]. For a [fine_gray()] fit
+the risk is the cumulative incidence (CIF) of the cause of interest at
+`horizon`, not one minus a survival probability.
 }
 \details{
 (A plain function dispatching on the model class, not an S3 generic, so it
 works as written: the S3 split is a follow-up for the roxygen run that
 regenerates `NAMESPACE`.)
+
+
+**Nested cross-validation results.** A `nested_cv_coxnet()` result has no
+single final model: each outer split refit the model on its own analysis
+set at its own chosen `mixture` and `penalty`. The risk is therefore one
+minus the mean of the outer splits' predicted survival at `horizon`, each
+split predicting at its own chosen `penalty` from its kept refit (the
+`.fits` column). A split that cannot score a row — a missing predictor, or
+a factor level its analysis set never saw — contributes `NA` for that row,
+and the mean is over the splits that could score it; a row no split could
+score gets `NA` risk. A split whose prediction fails outright is skipped
+with a warning naming the split, and if no split can predict at all the
+call errors rather than returning all-`NA` risk. Results created before
+the refits were kept (no `.fits` column) cannot be predicted from: re-run
+`nested_cv_coxnet()` to get one that can. As for [predict.coxnet_model()],
+each split's covariates are taken as constant from time 0, so the risk is
+the refits' implied survival from study entry — for a gap-mode run
+(`recurrent = "gap"`) that is the counting-process model's calendar-time
+survival, not a gap-time survival: a gap-time Brier score is not
+implemented, and this adapter does not invent one.
 }
 \examples{
 set.seed(1)

@@ -23,9 +23,13 @@ add_subject_status(
 factor or character `status` is matched on its labels, so a factor with
 levels `"0"`/`"1"` works as is, and one with levels
 `c("censored", "event")` needs `event = "event"` (an `event` that is not
-a label is an error). A logical `status` counts `TRUE` as the event.}
+a label is an error). A logical `status` counts `TRUE` as the event
+(`event` must be logical, or a value that coerces to logical without
+producing `NA`, e.g. `1`/`0`). A numeric `status` needs a numeric or
+logical `event`.}
 
-\item{name}{The name of the new column (default `"subject_status"`).}
+\item{name}{The name of the new column (default `"subject_status"`). It
+must not already exist in `data`.}
 }
 \value{
 `data` with an integer column `name` added.

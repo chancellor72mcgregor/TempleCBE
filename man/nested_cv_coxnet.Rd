@@ -120,13 +120,25 @@ error over outer splits, `FALSE` for each split's metrics.}
 \value{
 A tibble, of class `nested_cv_coxnet`, with one row per outer split:
   `id`, the chosen `mixture` and `penalty`, `.metrics` (outer assessment-set
-  metrics), `.coefs` (coefficients of the refit), and `.inner` (the inner
-  cross-validation's summarized metrics). If `importance = "loco_mp"`, includes
-  `.importance` with tidy LOCO-MP statistical inference. When
+  metrics), `.coefs` (coefficients of the refit), `.fits` (the refit itself,
+  a [coxnet()] model at the split's chosen `mixture` and `penalty`), and
+  `.inner` (the inner cross-validation's summarized metrics). If
+  `importance = "loco_mp"`, includes `.importance` with tidy LOCO-MP
+  statistical inference. When
   `tune_method` races, includes `.race`: a one-row tibble per outer split
   with `n_candidates`, `n_eliminated`, `n_survivors`, `n_resamples` (inner
-  resamples) and `candidates` (one row per candidate with `n_resamples`, the
-  inner resamples it was scored on, and `eliminated`). `tune::collect_metrics()`
+  resamples) and `candidates` (one row per candidate with `mixture` and
+  `penalty` — the finetune path lists only the tuned parameters —
+  `n_resamples`, the inner resamples it was scored on, and `eliminated`). When a race produced no candidates, the row is a
+  zero-count row (`n_candidates = 0` with an empty `candidates` table),
+  never `NULL`, so `.race[[i]]` is always a one-row tibble. On
+  counting-process data only `race_anova` is available (see "Racing");
+  `race_win_loss` is for right-censored data only. The `.fits` column is what [predict_event_risk()]
+  (and through it [calibration_from_model()] and
+  [decision_curve_from_model()]) predicts from: a nested result has no
+  single final model, so the risk at a horizon is one minus the mean of the
+  outer splits' predicted survival at that horizon, each split at its own
+  chosen `penalty`. `tune::collect_metrics()`
   averages `.metrics` over outer splits; [tidy_nested_cv_coxnet()] and
   [summarize_loco_mp()] unnest and summarize `.coefs` and `.importance`,
   and [tidy_outer_coefficients()], [summarize_outer_importance()] and

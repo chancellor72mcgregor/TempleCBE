@@ -1,6 +1,6 @@
 # TempleCBE Development & CI/CD Notes
 
-## Version: 0.11.2
+## Version: 0.13.0
 **Date:** November 22, 2026
 
 AGENTS.md (workflow, CI, conventions) and REVIEW.md (review levels, branch protection, releases) are the

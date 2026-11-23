@@ -803,6 +803,30 @@ run_start_stop_workflow <- function(fn, workflow, args, wflow_id) {
   )
 }
 
+#' Validate a `workflow_map_checkpointed()` Seed
+#'
+#' A seed that is not a usable R integer used to reach `set.seed()` (or
+#' `workflow_map()`) and run with only a coercion warning, so the run was
+#' effectively unseeded (R6-16). `NULL` means "draw a fresh seed", as in
+#' `workflow_map()`.
+#'
+#' @keywords internal
+#' @noRd
+check_workflow_map_seed <- function(seed) {
+  if (is.null(seed)) return(invisible(TRUE))
+  ok <- is.numeric(seed) && length(seed) == 1L && !is.na(seed) && is.finite(seed) &&
+    seed == trunc(seed) && abs(seed) <= .Machine$integer.max
+  if (!isTRUE(ok)) {
+    stop(
+      "`seed` must be NULL or a single integer within ",
+      format(.Machine$integer.max, scientific = FALSE),
+      " in magnitude; got ", paste(deparse(seed), collapse = " "), ".",
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 #' Checkpointed Workflow Sets Mapping (`workflow_map_checkpointed`)
 #'
 #' A resumable, fingerprinted wrapper around [workflowsets::workflow_map()] that
@@ -851,6 +875,10 @@ workflow_map_checkpointed <- function(object,
                                       progress = FALSE) {
   rlang::check_installed("workflowsets", reason = "for workflow_map_checkpointed().")
   checkpoint_mismatch <- resolve_checkpoint_mismatch(checkpoint_mismatch)
+  # Validate once, up front, so every path -- checkpointed or not, start/stop
+  # or plain `workflow_map()` -- rejects an out-of-range seed instead of
+  # running effectively unseeded (R6-16).
+  check_workflow_map_seed(seed)
 
   start_stop_fns <- c("tune_grid_start_stop", "tune_race_start_stop", "fit_resamples_start_stop")
   if (is.null(checkpoint_dir) && fn %in% start_stop_fns) {
@@ -894,6 +922,9 @@ workflow_map_checkpointed <- function(object,
     seed <- dots$seed
     dots$seed <- NULL
   }
+  # A `seed` passed in `...` replaces the formal one on this branch, so it
+  # needs the same check (R6-16).
+  check_workflow_map_seed(seed)
   if ("verbose" %in% names(dots)) {
     verbose <- dots$verbose
     dots$verbose <- NULL
@@ -954,6 +985,27 @@ workflow_map_checkpointed <- function(object,
         }
       }
       next
+    }
+
+    # A cached result for this workflow, verified against its fingerprint
+    # on read: reuse it without running anything, and without rewriting the
+    # checkpoint -- rewriting it would only move its mtime (R6-17). The
+    # read uses "recompute", so a mismatch falls through and recomputes
+    # exactly as before; a cached failure is recomputed, not replayed.
+    # write_verified_checkpoint() itself does not verify integrity -- it
+    # only writes -- so the read-time verification here is what makes
+    # skipping the write safe, as in checkpoint_map() and
+    # tune_grid_checkpointed(), which already return hits without writing.
+    ckpt_file <- file.path(w_dir, "workflow_result.rds")
+    if (file.exists(ckpt_file)) {
+      chk <- read_verified_checkpoint(ckpt_file, wflow_fps[i], checkpoint_mismatch = "recompute")
+      if (identical(chk$status, "hit") && !is_failed_result(chk$value)) {
+        results_list[[i]] <- drop_note_traces(chk$value)
+        # Drop this iteration's references, as at the end of the loop.
+        rm(w_spec)
+        wflow_args[i] <- list(NULL)
+        next
+      }
     }
 
     w_args <- wflow_args[[i]]

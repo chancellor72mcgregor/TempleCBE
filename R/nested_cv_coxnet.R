@@ -100,13 +100,25 @@
 #' @inheritParams cv_coxnet
 #' @return A tibble, of class `nested_cv_coxnet`, with one row per outer split:
 #'   `id`, the chosen `mixture` and `penalty`, `.metrics` (outer assessment-set
-#'   metrics), `.coefs` (coefficients of the refit), and `.inner` (the inner
-#'   cross-validation's summarized metrics). If `importance = "loco_mp"`, includes
-#'   `.importance` with tidy LOCO-MP statistical inference. When
+#'   metrics), `.coefs` (coefficients of the refit), `.fits` (the refit itself,
+#'   a [coxnet()] model at the split's chosen `mixture` and `penalty`), and
+#'   `.inner` (the inner cross-validation's summarized metrics). If
+#'   `importance = "loco_mp"`, includes `.importance` with tidy LOCO-MP
+#'   statistical inference. When
 #'   `tune_method` races, includes `.race`: a one-row tibble per outer split
 #'   with `n_candidates`, `n_eliminated`, `n_survivors`, `n_resamples` (inner
-#'   resamples) and `candidates` (one row per candidate with `n_resamples`, the
-#'   inner resamples it was scored on, and `eliminated`). `tune::collect_metrics()`
+#'   resamples) and `candidates` (one row per candidate with `mixture` and
+#'   `penalty` — the finetune path lists only the tuned parameters —
+#'   `n_resamples`, the inner resamples it was scored on, and `eliminated`). When a race produced no candidates, the row is a
+#'   zero-count row (`n_candidates = 0` with an empty `candidates` table),
+#'   never `NULL`, so `.race[[i]]` is always a one-row tibble. On
+#'   counting-process data only `race_anova` is available (see "Racing");
+#'   `race_win_loss` is for right-censored data only. The `.fits` column is what [predict_event_risk()]
+#'   (and through it [calibration_from_model()] and
+#'   [decision_curve_from_model()]) predicts from: a nested result has no
+#'   single final model, so the risk at a horizon is one minus the mean of the
+#'   outer splits' predicted survival at that horizon, each split at its own
+#'   chosen `penalty`. `tune::collect_metrics()`
 #'   averages `.metrics` over outer splits; [tidy_nested_cv_coxnet()] and
 #'   [summarize_loco_mp()] unnest and summarize `.coefs` and `.importance`,
 #'   and [tidy_outer_coefficients()], [summarize_outer_importance()] and
@@ -361,6 +373,13 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
       penalty = chosen,
       .metrics = list(outer_metrics),
       .coefs = list(tidy.coxnet_model(refit, penalty = chosen)),
+      # The refit itself, at the split's chosen mixture and penalty: the
+      # `.coefs` alone cannot predict (survival needs the fitted glmnet
+      # object and the Breslow baseline from the split's training data),
+      # so the refit is kept for predict_event_risk() and the validation
+      # adapters. It holds the split's analysis-set design matrix and
+      # outcome, so a nested result is larger than its metrics alone.
+      .fits = list(refit),
       .inner = list(inner_metrics)
     )
     if (importance == "loco_mp") {
@@ -397,8 +416,18 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
         covariates = covariates,
         recurrent = recurrent,
         trunc = trunc,
-        glmnet_args = canonicalize_dots_for_hash(list(...))
+        glmnet_args = canonicalize_dots_for_hash(list(...)),
+        # Rows now carry the outer refit in `.fits`. Checkpoints written
+        # before that have no `.fits`, so they must not count as hits:
+        # predict_event_risk() could not use them, and a re-run would keep
+        # reusing them. This key makes them mismatch once and recompute.
+        keeps_fits = TRUE
       )
+      # The `templecbe.cox_ties` option is the fit-time default when no
+      # explicit `cox.ties` is passed (see fit_glmnet_cox()), so flipping
+      # it would otherwise reuse the old checkpoints (R6-02). The default
+      # adds nothing here.
+      if (!identical(get_templecbe_cox_ties(), "breslow")) payload$cox_ties <- get_templecbe_cox_ties()
       paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
     }, character(1))
 
@@ -456,9 +485,22 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
 
 # One-row summary of an inner race: how many candidates entered, how many
 # were eliminated, and the per-candidate detail (`candidates`: mixture,
-# penalty, n_resamples, eliminated).
+# penalty, n_resamples, eliminated). A race with no candidates still returns
+# a one-row tibble — a zero-count row with an empty `candidates` table —
+# never NULL, so `.race[[i]]` always has the documented shape.
 race_summary <- function(candidates, n_resamples) {
-  if (is.null(candidates) || !nrow(candidates)) return(NULL)
+  if (is.null(candidates) || !nrow(candidates)) {
+    return(tibble::tibble(
+      n_candidates = 0L,
+      n_eliminated = 0L,
+      n_survivors = 0L,
+      n_resamples = as.integer(n_resamples),
+      candidates = list(tibble::tibble(
+        mixture = numeric(), penalty = numeric(),
+        n_resamples = integer(), eliminated = logical()
+      ))
+    ))
+  }
   tibble::tibble(
     n_candidates = nrow(candidates),
     n_eliminated = sum(candidates$eliminated),
@@ -470,12 +512,16 @@ race_summary <- function(candidates, n_resamples) {
 
 race_summary_finetune <- function(race_res, n_resamples) {
   m <- tryCatch(tune::collect_metrics(race_res), error = function(e) NULL)
-  if (is.null(m) || !nrow(m)) return(NULL)
+  if (is.null(m) || !nrow(m)) return(race_summary(NULL, n_resamples))
   params <- intersect(c("mixture", "penalty"), names(m))
   per <- dplyr::distinct(m[, c(params, ".config", "n"), drop = FALSE], .data$.config, .keep_all = TRUE)
   names(per)[names(per) == "n"] <- "n_resamples"
   per$n_resamples <- as.integer(per$n_resamples)
   per$eliminated <- per$n_resamples < max(per$n_resamples)
+  # `.config` is only the join key for the per-candidate rows: the native
+  # race path's candidates have no `.config`, so drop it to keep the two
+  # `.race$candidates` schemas identical.
+  per$.config <- NULL
   race_summary(tibble::as_tibble(per), n_resamples)
 }
 

@@ -36,10 +36,34 @@ tidy_nested_cv_coxnet <- function(x, what = c("coefficients", "importance")) {
   }
   rows <- lapply(seq_len(nrow(x)), function(i) {
     inner <- x[[col]][[i]]
-    if (is.null(inner) || !is.data.frame(inner) || !nrow(inner)) {
+    if (is.null(inner) || !is.data.frame(inner)) {
       return(NULL)
     }
     inner <- tibble::as_tibble(inner)
+    # The inner tibble carries the per-term rows only: the outer keys
+    # (`id`, `mixture`, `penalty`) live on `x` and are re-attached below,
+    # so a stray copy in an inner tibble is dropped rather than duplicating
+    # the column. The documented per-term columns are required, with an
+    # error naming the offending outer split.
+    required <- if (what == "coefficients") {
+      c("term", "estimate")
+    } else {
+      c("term", "importance", "std_error", "statistic", "p_value", "p_adjusted", "conf_low", "conf_high")
+    }
+    missing <- setdiff(required, names(inner))
+    if (length(missing)) {
+      stop(
+        "`x$", col, "` for outer split `", x$id[i], "` must contain ",
+        paste0("`", required, "`", collapse = ", "), "; missing ",
+        paste0("`", missing, "`", collapse = ", "), ".",
+        call. = FALSE
+      )
+    }
+    if (!nrow(inner)) {
+      return(NULL)
+    }
+    inner$id <- NULL
+    inner$mixture <- NULL
     inner$penalty <- NULL
     tibble::tibble(id = x$id[i], mixture = x$mixture[i], penalty = x$penalty[i], inner)
   })
@@ -94,9 +118,12 @@ summarize_loco_mp <- function(x, alpha = 0.05, label_map = NULL, style = NULL) {
     stop("`alpha` must be a single number between 0 and 1.", call. = FALSE)
   }
   pick <- function(d, col) if (col %in% names(d)) d[[col]] else rep(NA_real_, nrow(d))
+  # NA terms are dropped: subsetting with a logical index containing NA
+  # would insert all-NA rows into every term's summary.
   terms <- unique(as.character(x$term))
+  terms <- terms[!is.na(terms)]
   rows <- lapply(terms, function(tm) {
-    d <- x[x$term == tm & !is.na(x$importance), , drop = FALSE]
+    d <- x[which(!is.na(x$term) & x$term == tm & !is.na(x$importance)), , drop = FALSE]
     imp <- d$importance
     n <- length(imp)
     p_adj <- pick(d, "p_adjusted")

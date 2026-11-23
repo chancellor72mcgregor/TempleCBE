@@ -523,7 +523,16 @@ tidy_outer_coefficients <- function(x) {
     stop("`x` must be a data frame returned by score_outer().", call. = FALSE)
   }
   if (!"coefficients" %in% names(x)) {
-    stop("`x` must contain a 'coefficients' list column.", call. = FALSE)
+    stop(
+      "`x` must contain a 'coefficients' list column",
+      if (is.data.frame(x) && all(c("id", "mixture", "penalty") %in% names(x))) {
+        "; a nested_cv_coxnet() result needs a `.coefs` list column"
+      } else {
+        ""
+      },
+      ".",
+      call. = FALSE
+    )
   }
 
   res_list <- lapply(seq_len(nrow(x)), function(i) {
