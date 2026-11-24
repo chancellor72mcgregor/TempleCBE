@@ -210,7 +210,7 @@ extract_horizon_risk <- function(pred, horizon) {
 #'     metrics = yardstick::metric_set(yardstick::brier_survival_integrated,
 #'                                     yardstick::concordance_survival),
 #'     nlambda = 10, cox.ties = "breslow")
-#'   predict_event_risk(res, d_nested[1:5, ], horizon = 10)
+#'   print(predict_event_risk(res, d_nested[1:5, ], horizon = 10))
 #'
 #'   # The same adapter works on start/stop (counting-process) data fit
 #'   # in gap mode — but what it returns is still the refits' implied
