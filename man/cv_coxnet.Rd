@@ -158,7 +158,8 @@ analysis and the assessment set of a split; see Details and
 
 \item{metrics}{A [yardstick::metric_set()] of survival metrics. Defaults to
 the integrated Brier score, concordance, time-specific Brier score, and
-time-dependent ROC AUC.}
+time-dependent ROC AUC. In gap mode only `concordance_survival`,
+`brier_survival_integrated` and `brier_survival` are available.}
 
 \item{eval_time}{Evaluation times. Defaults to deciles (10th to 90th
 percentile) of the observed event times.}
@@ -173,10 +174,11 @@ in `metrics` by default.}
 \item{recurrent}{How recurrent (start/stop) data are scored: `"error"`
 (default; a subject with an event before its last interval stops the fit),
 `"first"` (score the time to the first event only), or `"gap"` (score the
-whole recurrent process by gap-time concordance; see Details). In gap
-mode `metrics` must contain only `concordance_survival` (the default
-there), and `eval_time` is used only for the refit model's predictions,
-not for scoring.}
+whole recurrent process by gap; see Details). In gap mode `metrics` may
+contain `concordance_survival` (the default there), `brier_survival_integrated`
+and `brier_survival`, and `eval_time` sets the gap times the Brier score
+is integrated over (with concordance only, it is used only for the refit
+model's predictions, not for scoring).}
 
 \item{parallel}{If `TRUE`, fit folds with [furrr::future_map()]; set a
 [future::plan()] first.}
@@ -287,12 +289,32 @@ per resample that gives the count. A resample with no subject left is skipped.
 Recurrent events (an event before a subject's last interval) stop with an
 error unless `recurrent` says otherwise: `"first"` scores the time to first
 event ([surv_subject_truth()]), and `"gap"` scores the whole recurrent
-process by gap-time concordance (see [surv_gap_truth()]). Gap-time
-concordance is Harrell's C over gaps, using each interval's linear
-predictor as its risk: it treats a subject's gaps as independent
-observations, needs no censoring weights, and is the only metric in gap
-mode. A recurrent-event Brier score is not computed; that is follow-up
-work, not part of this draft.
+process by gap (see [surv_gap_truth()]). Gap-time concordance is Harrell's
+C over gaps, using each interval's linear predictor as its risk: it treats
+a subject's gaps as independent observations and needs no censoring
+weights. The gap-time Brier score (integrated, `brier_survival_integrated`,
+or at one time, `brier_survival`) scores each gap by its conditional
+gap-time survival under the fitted Andersen-Gill model -- the Breslow
+baseline hazard integrated over the gap's own window, times the gap's
+linear predictor -- with gap-level inverse-probability-of-censoring
+weights that condition on the gap's entry time (see [predict_gap_survival()]
+and [gap_graf_weights()]). Gaps are event-to-event: a subject's rows up to
+and including an event form one gap, and the baseline hazard is integrated
+piecewise over the gap's rows, so splitting a gap's rows does not change
+the score. The censoring distribution `G` is the reverse
+Kaplan-Meier on the training subjects' full follow-up -- each subject's
+last interval ([surv_subject_truth()] with `recurrent = "last"`), so a
+subject's censoring time counts whenever follow-up ends in censoring,
+not only when it ends at the first event. The Brier score is integrated over `eval_time`
+the way [yardstick::brier_survival_integrated()] integrates it, and
+averaged over gaps, so like concordance it describes gaps, not subjects.
+A gap entering late can run past the last training event time, where the
+Breslow baseline is flat, so its predicted survival is too high over the
+rest of the window; the effect is bounded by the 90th-percentile default
+`eval_time` and the capped censoring weights, and the simulation shows no
+bias.
+Gap mode defaults to concordance only; pass `metrics` to add the Brier
+scores, and `roc_auc_survival` is not available there.
 
 **Selection.** `lambda.min` is the penalty, across all `mixture` values,
 with the best mean `metric` over folds (for time-specific metrics, at the

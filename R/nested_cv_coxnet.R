@@ -93,7 +93,8 @@
 #'   [cv_coxnet()] for the fields the start/stop race uses.
 #' @param recurrent How recurrent (start/stop) data are scored, as in
 #'   [cv_coxnet()]: `"error"` (default), `"first"`, or `"gap"` (gap-time
-#'   concordance; needs `tune_method = "grid"` or `"race_anova"`).
+#'   concordance and gap-time Brier scores; needs `tune_method = "grid"` or
+#'   `"race_anova"`).
 #' @param checkpoint_dir Optional directory path where per-split checkpoints are stored.
 #' @param shard Optional shard specification (e.g. `c(1, 2)`) for distributed computation.
 #' @param checkpoint_mismatch Action on mismatch: `"recompute"`, `"overwrite"`, or `"error"`.
@@ -198,11 +199,11 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
       )
     }
     gap_info <- surv_metric_info(metrics)
-    if (!all(gap_info$metric == "concordance_survival")) {
+    if (!all(gap_info$metric %in% c("concordance_survival", "brier_survival_integrated", "brier_survival"))) {
       stop(
-        "`recurrent = \"gap\"` scores gap-time concordance only; pass ",
-        "`metrics = yardstick::metric_set(yardstick::concordance_survival)`. ",
-        "A recurrent-event Brier score is not implemented.",
+        "`recurrent = \"gap\"` scores gap-time concordance and gap-time Brier scores only; pass ",
+        "`metrics` with `concordance_survival`, `brier_survival_integrated` or `brier_survival`. ",
+        "`roc_auc_survival` is not available in gap mode.",
         call. = FALSE
       )
     }
@@ -328,9 +329,23 @@ nested_cv_coxnet <- function(object, preprocessor, subject_id = NULL, group = NU
     test <- list(x = test$x[usable, , drop = FALSE], y = test$y[usable])
     subject_test <- subject_test[usable]
     if (gap_mode) {
-      outer_metrics <- score_gap_path(
-        refit$fit, test$x, test$y, subject_test, penalty = chosen
-      )
+      outer_parts <- list()
+      if (any(info$metric == "concordance_survival")) {
+        outer_parts <- c(outer_parts, list(score_gap_path(
+          refit$fit, test$x, test$y, subject_test, penalty = chosen
+        )))
+      }
+      brier_names <- intersect(info$metric, c("brier_survival_integrated", "brier_survival"))
+      if (length(brier_names)) {
+        brier_metrics <- yardstick_metric_set(brier_names)
+        subject_train <- subject_keys(refit$y, subject_values(analysis, spec))
+        outer_parts <- c(outer_parts, list(score_gap_brier_path(
+          refit$fit, refit$x, refit$y, subject_train, test$x, test$y, subject_test,
+          penalty = chosen, eval_time = eval_time, metrics = brier_metrics,
+          info = surv_metric_info(brier_metrics), trunc = trunc
+        )))
+      }
+      outer_metrics <- purrr::list_rbind(outer_parts)
       outer_metrics$penalty <- NULL
     } else {
       truth_train <- surv_subject_truth(refit$y, subject_keys(refit$y, subject_values(analysis, spec)), recurrent = recurrent)

@@ -879,33 +879,30 @@ test_that("A1: first-event IBS exists in cv_coxnet(recurrent = 'first')", {
   expect_true(any(!is.na(ibs$mean)))
 })
 
-test_that("A1: gap mode refuses Brier metrics instead of reporting a gap IBS", {
+test_that("A1: gap mode scores Brier metrics as gap IBS (was: refuses them)", {
   skip_if_no_coxnet_deps()
   long <- r6_feat_counting()
   resamples <- rsample::group_vfold_cv(long, group = "subject_id", v = 2)
-  expect_error(
-    cv_coxnet(
-      survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3,
-      data = long, subject_id = "subject_id", mixture = 1,
-      resamples = resamples, recurrent = "gap",
-      metrics = yardstick::metric_set(yardstick::brier_survival_integrated),
-      nlambda = 10, cox.ties = "breslow"
-    ),
-    "not implemented"
+  res <- cv_coxnet(
+    survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3,
+    data = long, subject_id = "subject_id", mixture = 1,
+    resamples = resamples, recurrent = "gap",
+    metrics = yardstick::metric_set(yardstick::brier_survival_integrated),
+    nlambda = 10, cox.ties = "breslow"
   )
-  # A gap-mode run with an explicitly Brier metric errors rather than
-  # scoring a gap IBS (with default metrics it silently falls back to
-  # concordance-only, by design in nested_cv_coxnet()).
-  expect_error(
-    nested_cv_coxnet(
-      r6_feat_counting_folds(long),
-      survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3,
-      subject_id = "subject_id", mixture = 1, recurrent = "gap",
-      metrics = yardstick::metric_set(yardstick::brier_survival_integrated),
-      nlambda = 10, cox.ties = "breslow"
-    ),
-    "not implemented"
+  ibs <- res$metrics[res$metrics$.metric == "brier_survival_integrated", ]
+  expect_true(nrow(ibs) > 0)
+  expect_true(any(!is.na(ibs$mean)))
+  expect_true(all(ibs$mean >= 0 & ibs$mean <= 1, na.rm = TRUE))
+  nested <- nested_cv_coxnet(
+    r6_feat_counting_folds(long),
+    survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3,
+    subject_id = "subject_id", mixture = 1, recurrent = "gap",
+    metrics = yardstick::metric_set(yardstick::brier_survival_integrated),
+    nlambda = 10, cox.ties = "breslow"
   )
+  outer_ibs <- lapply(nested$.metrics, function(m) m[m$.metric == "brier_survival_integrated", ])
+  expect_true(all(vapply(outer_ibs, nrow, integer(1)) > 0))
 })
 
 test_that("A1: gap mode still scores gap-time concordance only", {

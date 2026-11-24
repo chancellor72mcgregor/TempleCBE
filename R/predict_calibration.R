@@ -159,8 +159,9 @@ extract_horizon_risk <- function(pred, horizon) {
 #' each split's covariates are taken as constant from time 0, so the risk is
 #' the refits' implied survival from study entry — for a gap-mode run
 #' (`recurrent = "gap"`) that is the counting-process model's calendar-time
-#' survival, not a gap-time survival: a gap-time Brier score is not
-#' implemented, and this adapter does not invent one.
+#' survival, not a gap-time survival: this adapter does not invent one
+#' (gap-time Brier scoring lives in `cv_coxnet(recurrent = "gap")`, which
+#' scores gaps directly).
 #'
 #' @param object A fitted `coxnet_model`, `cv_coxnet`, `joint_model`,
 #'   `cox_time_varying`, `fine_gray_model` or `nested_cv_coxnet` object.

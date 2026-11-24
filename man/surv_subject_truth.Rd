@@ -4,7 +4,11 @@
 \alias{surv_subject_truth}
 \title{Collapse Survival Outcomes to One Row per Subject}
 \usage{
-surv_subject_truth(truth, subject_id = NULL, recurrent = c("error", "first"))
+surv_subject_truth(
+  truth,
+  subject_id = NULL,
+  recurrent = c("error", "first", "last")
+)
 }
 \arguments{
 \item{truth}{A [survival::Surv()] object: `Surv(time, event)` or
@@ -15,7 +19,9 @@ for counting-process data; for right-censored data each row is its own
 subject when `subject_id` is `NULL`.}
 
 \item{recurrent}{`"error"` (default) stops when a subject has an event before
-their last interval; `"first"` keeps each subject's time to first event.}
+their last interval; `"first"` keeps each subject's time to first event;
+`"last"` keeps each subject's last interval (end of follow-up), for
+estimating the calendar censoring distribution in gap-time scoring.}
 }
 \value{
 A tibble with one row per subject, sorted by `subject_id`:
@@ -38,7 +44,8 @@ metrics require.
 For counting-process data, a subject's time is the stop time of their last
 interval and their event status is the status of that interval. Rows are
 checked first: within a subject, intervals must not overlap, and an event
-may only occur in the last interval, unless `recurrent = "first"`.
+may only occur in the last interval, unless `recurrent = "first"` (time to
+first event) or `recurrent = "last"` (end of follow-up, below).
 
 With `recurrent = "first"` (recurrent events, such as repeated readmissions)
 a subject is scored on the time to their **first** event: the rows after the
@@ -48,6 +55,18 @@ yardstick's survival metrics can score. The recurrent process itself is
 modelled with [recurrent_cox()]; to score the whole recurrent process
 instead of only the first event, see [surv_gap_truth()] and
 `cv_coxnet(recurrent = "gap")`, which score gap-time concordance.
+
+With `recurrent = "last"` a subject is summarised by the **end of their
+follow-up**: the stop of their last interval, with that interval's status
+(an event in the last interval, or censoring). That is the outcome the
+calendar censoring distribution is estimated from for gap-time scoring
+(`cv_coxnet(recurrent = "gap")`): a subject's censoring time `C` is only
+revealed when follow-up ends in censoring, so first-event times would
+understate late censoring -- most subjects are still under follow-up long
+after their first event, and a reverse Kaplan-Meier on first-event times
+is badly biased at late times. Do not use `recurrent = "last"` to score a
+subject's survival: it describes when follow-up ended, not when the
+subject's event happened.
 }
 \examples{
 if (requireNamespace("survival", quietly = TRUE)) {
