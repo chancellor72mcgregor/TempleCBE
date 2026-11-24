@@ -210,6 +210,41 @@ extract_horizon_risk <- function(pred, horizon) {
 #'                                     yardstick::concordance_survival),
 #'     nlambda = 10, cox.ties = "breslow")
 #'   predict_event_risk(res, d_nested[1:5, ], horizon = 10)
+#'
+#'   # The same adapter works on start/stop (counting-process) data fit
+#'   # in gap mode — but what it returns is still the refits' implied
+#'   # survival from study entry (calendar-time risk, each subject's
+#'   # covariates held constant from time 0), not a gap-time risk. Gap
+#'   # mode scores gap-time concordance only; a gap-time Brier score is
+#'   # not implemented, and this adapter does not invent one.
+#'   set.seed(1)
+#'   long <- do.call(rbind, lapply(seq_len(60), function(i) {
+#'     k <- sample(1:3, 1)
+#'     stops <- round(cumsum(stats::runif(k, 2, 6)), 2)
+#'     risk <- stats::rnorm(1)
+#'     data.frame(
+#'       subject_id = i,
+#'       tstart = c(0, utils::head(stops, -1)),
+#'       tstop = stops,
+#'       status = c(rep(0L, k - 1), stats::rbinom(1, 1, stats::plogis(1.5 * risk))),
+#'       x1 = risk + stats::rnorm(k, sd = 0.2),
+#'       x2 = stats::rnorm(k),
+#'       x3 = stats::rnorm(k)
+#'     )
+#'   }))
+#'   set.seed(1)
+#'   folds_gap <- rsample::nested_cv(
+#'     long,
+#'     outside = rsample::group_vfold_cv(group = "subject_id", v = 2),
+#'     inside = rsample::group_vfold_cv(group = "subject_id", v = 2))
+#'   res_gap <- nested_cv_coxnet(folds_gap,
+#'     survival::Surv(tstart, tstop, status) ~ x1 + x2 + x3,
+#'     subject_id = "subject_id", mixture = 1, recurrent = "gap",
+#'     metrics = yardstick::metric_set(yardstick::concordance_survival),
+#'     nlambda = 10, cox.ties = "breslow")
+#'   # One row per subject, predictors as in the fit.
+#'   new_gap <- long[!duplicated(long$subject_id), ]
+#'   predict_event_risk(res_gap, new_gap[1:5, ], horizon = 5)
 #' }
 predict_event_risk <- function(object, new_data, horizon, penalty = NULL, ...) {
   # Validated up front: the branches below that return early (rows with a
