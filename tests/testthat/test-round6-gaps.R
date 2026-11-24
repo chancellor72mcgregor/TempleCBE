@@ -794,6 +794,21 @@ test_that("A4: predict_event_risk() works on start/stop nested results", {
   expect_true(any(!is.na(risk)))
 })
 
+test_that("A4: predict_event_risk() works on gap-mode nested results", {
+  skip_if_no_coxnet_deps()
+  long <- r6_feat_counting()
+  res <- r6_feat_nested_counting(long, recurrent = "gap",
+    metrics = yardstick::metric_set(yardstick::concordance_survival))
+  # One row per subject; the risk is calendar-time risk from study entry,
+  # not a gap-time risk — gap-time Brier scoring lives in
+  # cv_coxnet(recurrent = "gap").
+  new_data <- long[!duplicated(long$subject_id), ]
+  risk <- predict_event_risk(res, new_data, horizon = 5)
+  expect_length(risk, nrow(new_data))
+  expect_true(all(is.na(risk) | (risk >= 0 & risk <= 1)))
+  expect_true(any(!is.na(risk)))
+})
+
 test_that("A4: calibration_from_model() and decision_curve_from_model() accept nested results", {
   skip_if_no_coxnet_deps()
   d <- r6_feat_right()
