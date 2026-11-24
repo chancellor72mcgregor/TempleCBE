@@ -98,9 +98,9 @@ if (requireNamespace("rsample", quietly = TRUE) &&
   # The same adapter works on start/stop (counting-process) data fit
   # in gap mode — but what it returns is still the refits' implied
   # survival from study entry (calendar-time risk, each subject's
-  # covariates held constant from time 0), not a gap-time risk. Gap
-  # mode scores gap-time concordance only; a gap-time Brier score is
-  # not implemented, and this adapter does not invent one.
+  # covariates held constant from time 0), not a gap-time risk. To
+  # score gaps themselves, use the gap-time concordance and Brier
+  # metrics of `cv_coxnet(recurrent = "gap")`.
   set.seed(1)
   long <- do.call(rbind, lapply(seq_len(60), function(i) {
     k <- sample(1:3, 1)
