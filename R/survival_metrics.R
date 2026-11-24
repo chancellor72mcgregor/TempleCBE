@@ -869,6 +869,25 @@ canonicalize_recipe_for_hash <- function(recipe) {
   )
 }
 
+#' Canonicalize a Preprocessor for Checkpoint Fingerprinting
+#'
+#' A formula is reduced to its terms string and a recipe to its canonical
+#' steps, so changing the predictor set (or a recipe step) changes the
+#' fingerprint. A character vector of predictor names (from an `x`/`y`
+#' spec) is used as-is.
+#'
+#' @keywords internal
+#' @noRd
+canonicalize_preprocessor_for_hash <- function(preprocessor) {
+  if (inherits(preprocessor, "formula")) {
+    formula_terms_string(preprocessor)
+  } else if (inherits(preprocessor, "recipe")) {
+    canonicalize_recipe_for_hash(preprocessor)
+  } else {
+    preprocessor
+  }
+}
+
 #' Canonicalize Dots / Settings for Checkpoint Fingerprinting
 #'
 #' @keywords internal
