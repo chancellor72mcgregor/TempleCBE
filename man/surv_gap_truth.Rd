@@ -34,9 +34,9 @@ so can only score the time to first (or last) event, this keeps every gap.
 Gaps within a subject are correlated -- a subject with a short first gap
 tends to have short later gaps -- and gap-time concordance treats them as
 independent observations, so it describes the ordering of gaps, not of
-subjects. There is no recurrent-event Brier score here: a recurrent IBS
-(scoring the whole counting process, not one gap at a time) is follow-up
-work, not part of this draft.
+subjects. Gap-time Brier scores use the same one-row-per-gap truth, with
+the conditional gap-time survival ([predict_gap_survival()]) and gap-level
+censoring weights ([gap_graf_weights()]); see `cv_coxnet(recurrent = "gap")`.
 }
 \examples{
 if (requireNamespace("survival", quietly = TRUE)) {

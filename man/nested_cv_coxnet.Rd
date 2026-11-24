@@ -52,7 +52,8 @@ for each `mixture`.}
 
 \item{metrics}{A [yardstick::metric_set()] of survival metrics. Defaults to
 the integrated Brier score, concordance, time-specific Brier score, and
-time-dependent ROC AUC.}
+time-dependent ROC AUC. In gap mode only `concordance_survival`,
+`brier_survival_integrated` and `brier_survival` are available.}
 
 \item{eval_time}{Evaluation times, shared by all splits. Defaults to deciles
 of the event times in the full data.}
@@ -66,7 +67,8 @@ in `metrics` by default.}
 
 \item{recurrent}{How recurrent (start/stop) data are scored, as in
 [cv_coxnet()]: `"error"` (default), `"first"`, or `"gap"` (gap-time
-concordance; needs `tune_method = "grid"` or `"race_anova"`).}
+concordance and gap-time Brier scores; needs `tune_method = "grid"` or
+`"race_anova"`).}
 
 \item{parallel}{If `TRUE`, fit folds with [furrr::future_map()]; set a
 [future::plan()] first.}
