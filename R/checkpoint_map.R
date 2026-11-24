@@ -95,11 +95,18 @@ checkpoint_map <- function(.x,
       stop("`fingerprint` must be a function or a vector of length 1 or length(.x).", call. = FALSE)
     }
   } else {
+    # The mapped function is part of the fingerprint: without it, changing
+    # `.f` silently reuses the previous function's cached results (R7-03).
+    # Deparse the (already `as_function()`-converted) function so the
+    # fingerprint covers its formals and body; a user-supplied `fingerprint`
+    # argument bypasses this path entirely.
+    f_repr <- paste(deparse(.f), collapse = "\n")
     vapply(seq_len(n), function(i) {
       payload <- list(
         schema = ckpt_schema,
         seed_scheme = current_seed_scheme(),
         item = .x[[i]],
+        f = f_repr,
         dots = dots
       )
       paste0(as.character(openssl::sha256(serialize(payload, NULL))), collapse = "")
