@@ -68,6 +68,33 @@ d <- data.frame(time = rexp(n, 0.05), status = rbinom(n, 1, 0.6),
                 age = rnorm(n, 60, 10), sex = rbinom(n, 1, 0.5))
 fit <- coxnet(survival::Surv(time, status) ~ age + sex, data = d, penalty = 0.1)
 predict_event_risk(fit, d[1:5, ], horizon = 10)
+
+# A nested cross-validation result has no single final model: each outer
+# split refit the model at its own chosen penalty, and `predict_event_risk()`
+# averages the splits' predicted survival at the horizon, each split
+# predicting from its kept refit (the `.fits` column). The same result
+# feeds [calibration_from_model()] and [decision_curve_from_model()].
+if (requireNamespace("rsample", quietly = TRUE) &&
+    requireNamespace("yardstick", quietly = TRUE)) {
+  set.seed(2)
+  x1 <- stats::rnorm(60)
+  x2 <- stats::rnorm(60)
+  t_event <- stats::rexp(60, 0.05 * exp(0.8 * x1))
+  t_cens <- stats::rexp(60, 0.05)
+  d_nested <- data.frame(time = pmin(t_event, t_cens),
+                         status = as.integer(t_event <= t_cens),
+                         x1 = x1, x2 = x2)
+  set.seed(2)
+  folds <- rsample::nested_cv(d_nested,
+    outside = rsample::vfold_cv(v = 2), inside = rsample::vfold_cv(v = 2))
+  res <- nested_cv_coxnet(folds,
+    survival::Surv(time, status) ~ x1 + x2,
+    mixture = 1,
+    metrics = yardstick::metric_set(yardstick::brier_survival_integrated,
+                                    yardstick::concordance_survival),
+    nlambda = 10, cox.ties = "breslow")
+  predict_event_risk(res, d_nested[1:5, ], horizon = 10)
+}
 }
 \seealso{
 [extract_horizon_risk()], [calibration_from_model()],
